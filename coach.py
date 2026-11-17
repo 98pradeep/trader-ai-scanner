@@ -1,0 +1,378 @@
+"""coach.py - how Trader AI develops itself, and how much it has learned so far. (compact cloud copy: the readable version is in your Mac's trader folder)"""
+import json
+import math
+import os
+from collections import defaultdict
+from datetime import datetime, timedelta, timezone
+from pathlib import Path
+DATA = Path(os.getenv('TRADER_DATA_DIR', 'trader_data'))
+DATA.mkdir(exist_ok=True)
+COACH = DATA / 'coach.json'
+BREAKEVEN = 100 / 3
+MAX_BARS = 60
+LEVELS = [(0, 'Newborn', "I've barely started: patterns from fewer than 10 graded signals mean very little"), (10, 'Learning', "I'm collecting evidence: first hints, not proof"), (30, 'Developing', 'I have enough results to spot real patterns'), (100, 'Experienced', 'I have a solid track record to learn from'), (300, 'Seasoned', 'I have a large, reliable track record')]
+
+def _read(path, default):
+    try:
+        return json.loads(Path(path).read_text())
+    except Exception:
+        return default
+
+def load():
+    c = _read(COACH, {})
+    c.setdefault('enabled', True)
+    c.setdefault('rules', {'min_stop': {}, 'late_cutoff': {}, 'cooldown': {}})
+    for k in ('min_stop', 'late_cutoff', 'cooldown'):
+        c['rules'].setdefault(k, {})
+    c.setdefault('history', [])
+    c.setdefault('shadow', [])
+    c.setdefault('stats', {})
+    return c
+
+def save(c):
+    c['history'] = c['history'][-60:]
+    c['shadow'] = c['shadow'][-400:]
+    COACH.write_text(json.dumps(c, indent=1, default=str))
+
+def _now():
+    return datetime.now(timezone.utc).isoformat(timespec='seconds')
+
+def journal():
+    rows = []
+    try:
+        for line in (DATA / 'journal.jsonl').read_text().splitlines():
+            try:
+                rows.append(json.loads(line))
+            except Exception:
+                pass
+    except Exception:
+        pass
+    return rows
+
+def _stop_pct(r):
+    try:
+        return (r['entry'] - r['stop']) / r['entry'] * 100
+    except Exception:
+        return None
+
+def _minute(r):
+    try:
+        t = datetime.fromisoformat(str(r['time']))
+        return t.hour * 60 + t.minute
+    except Exception:
+        return None
+
+def _agg(rs):
+    n = len(rs)
+    if not n:
+        return {'n': 0, 'wins': 0, 'win_rate': 0.0, 'total_R': 0.0, 'avg_R': 0.0}
+    tot = sum((float(r.get('r') or 0) for r in rs))
+    wins = sum((1 for r in rs if (r.get('r') or 0) > 0))
+    return {'n': n, 'wins': wins, 'win_rate': round(wins / n * 100, 1), 'total_R': round(tot, 2), 'avg_R': round(tot / n, 2)}
+
+def _bucket_stop(r):
+    s = _stop_pct(r)
+    if s is None:
+        return 'unknown'
+    return 'under 1%' if s < 1 else '1% to 3%' if s < 3 else 'over 3%'
+
+def _bucket_time(r):
+    m = _minute(r)
+    if m is None or r.get('tf') == '1d':
+        return None
+    return 'first hour (9:30-10:30)' if m < 630 else 'last 30 minutes (after 3:30 pm)' if m >= 930 else 'middle of the day'
+
+def _bucket_price(r):
+    e = r.get('entry') or 0
+    return 'under $5 (penny-ish)' if e < 5 else '$5 to $50' if e < 50 else 'over $50'
+
+def _group(rs, fn):
+    g = defaultdict(list)
+    for r in rs:
+        k = fn(r)
+        if k:
+            g[k].append(r)
+    return {k: _agg(v) for (k, v) in g.items()}
+
+def _conf(n):
+    return 'early hint' if n < 10 else 'pattern' if n < 30 else 'solid'
+
+def stats():
+    rows = journal()
+    graded = [r for r in rows if r.get('status') in ('WIN', 'LOSS', 'EXPIRED')]
+    paper = _read(DATA / 'paper.json', [])
+    closed = [p for p in paper if p.get('status') == 'CLOSED']
+    brain = _read(DATA / 'brain_knowledge.json', {})
+    notified = _read(DATA / 'notified.json', {})
+    c = load()
+    dates = set()
+    for r in rows:
+        dates.add(str(r.get('time', ''))[:10])
+    for p in paper:
+        dates.add(str(p.get('opened', ''))[:10])
+    for u in brain.get('updates', []):
+        dates.add(str(u.get('ts', ''))[:10])
+    dates.discard('')
+    (curve, tot) = ([], 0.0)
+    for r in sorted(graded, key=lambda r: str(r.get('time'))):
+        tot += float(r.get('r') or 0)
+        curve.append({'time': str(r.get('time'))[:16], 'ticker': r['ticker'], 'R': round(tot, 2)})
+    early = [p for p in closed if p.get('exit') is not None and p['stop'] < p['exit'] < p['target']]
+    quiz = brain.get('quiz', {})
+    shadow_graded = [s for s in c['shadow'] if s.get('status') != 'OPEN']
+    st = {'first_day': min(dates) if dates else None, 'days_active': len(dates), 'signals_logged': len(rows), 'signals_graded': len(graded), 'signals_waiting': len(rows) - len(graded), 'overall': _agg(graded), 'by_tf': _group(graded, lambda r: r.get('tf')), 'by_stop': _group(graded, _bucket_stop), 'by_time': _group(graded, _bucket_time), 'by_price': _group(graded, _bucket_price), 'by_ticker': _group(graded, lambda r: r.get('ticker')), 'curve': curve, 'paper': {'closed': len(closed), 'open': sum((1 for p in paper if p.get('status') == 'OPEN')), 'pnl': round(sum((float(p.get('pnl') or 0) for p in closed)), 2), 'wins': sum((1 for p in closed if (p.get('pnl') or 0) > 0)), 'losses': sum((1 for p in closed if (p.get('pnl') or 0) < 0)), 'closed_early': len(early)}, 'brain': {'lookups': brain.get('stats', {}).get('lookups', 0), 'taught': len(brain.get('taught', [])), 'ratings': len(brain.get('feedback', [])), 'watchlist': len(brain.get('watchlist', [])), 'self_updates': len(brain.get('updates', []))}, 'quiz': {'asked': quiz.get('asked', 0), 'right': quiz.get('right', 0)}, 'notifier': {'checks': notified.get('checks_total', len(notified.get('log', []))), 'sent': len(notified.get('sent', {}))}, 'coach': {'rules': rules_list(c), 'changes': len(c['history']), 'shadow_logged': len(c['shadow']), 'shadow_graded': len(shadow_graded), 'shadow': _agg(shadow_graded), 'enabled': c['enabled']}}
+    st['level'] = level(st)
+    return st
+
+def level(st):
+    n = st['signals_graded']
+    idx = max((i for (i, (lo, _, _)) in enumerate(LEVELS) if n >= lo))
+    nxt = LEVELS[idx + 1][0] if idx + 1 < len(LEVELS) else None
+    b = st['brain']
+    xp = n * 3 + st['signals_logged'] + b['lookups'] + b['taught'] * 5 + b['ratings'] * 2 + st['quiz']['right'] * 2 + st['paper']['closed'] * 2 + st['coach']['changes'] * 10 + b['self_updates']
+    return {'number': idx + 1, 'name': LEVELS[idx][1], 'meaning': LEVELS[idx][2], 'next_at': nxt, 'to_next': nxt - n if nxt else 0, 'progress': (n - LEVELS[idx][0]) / (nxt - LEVELS[idx][0]) if nxt else 1.0, 'xp': xp}
+
+def lessons(st=None):
+    st = st or stats()
+    out = []
+    o = st['overall']
+    if o['n']:
+        good = o['win_rate'] >= BREAKEVEN
+        out.append({'text': f"Overall the app's BUY signals won {o['wins']} of {o['n']} ({o['win_rate']:.0f}%), total {o['total_R']:+.1f}R. At 2 : 1 reward / risk it needs about 34% wins to break even, so it is {('AHEAD' if good else 'BEHIND')} so far.", 'n': o['n'], 'kind': 'good' if good else 'bad'})
+    else:
+        out.append({'text': 'No signal has been graded yet. Every BUY the app sees is saved and checked later, so keep the app or the notifier running.', 'n': 0, 'kind': 'info'})
+    for (name, g) in st['by_stop'].items():
+        if g['n'] >= 3 and g['win_rate'] < 20:
+            out.append({'text': f"Signals with a stop {name} from the entry lost {g['n'] - g['wins']} of {g['n']}. Stops that tight get knocked out by normal price wiggles.", 'n': g['n'], 'kind': 'bad'})
+        elif g['n'] >= 3 and g['win_rate'] >= 50:
+            out.append({'text': f"Signals with a stop {name} away did well: {g['wins']} of {g['n']} won.", 'n': g['n'], 'kind': 'good'})
+    for (name, g) in st['by_tf'].items():
+        if g['n'] >= 4:
+            out.append({'text': f"{name} candles: {g['wins']} of {g['n']} won ({g['total_R']:+.1f}R)." + (' Short candles are noisy: try 15m or 1h if this stays negative.' if name == '5m' and g['total_R'] < 0 else ''), 'n': g['n'], 'kind': 'good' if g['total_R'] > 0 else 'bad'})
+    for (name, g) in st['by_time'].items():
+        if g['n'] >= 3 and (g['win_rate'] < 20 or g['win_rate'] >= 50):
+            out.append({'text': f"Signals in the {name}: {g['wins']} of {g['n']} won.", 'n': g['n'], 'kind': 'good' if g['win_rate'] >= 50 else 'bad'})
+    for (name, g) in st['by_price'].items():
+        if g['n'] >= 3 and (g['win_rate'] < 20 or g['win_rate'] >= 50):
+            out.append({'text': f"Stocks priced {name}: {g['wins']} of {g['n']} won.", 'n': g['n'], 'kind': 'good' if g['win_rate'] >= 50 else 'bad'})
+    for (name, g) in st['by_ticker'].items():
+        if g['n'] >= 3 and g['wins'] == 0:
+            out.append({'text': f"{name} failed {g['n']} times in a row with these rules.", 'n': g['n'], 'kind': 'bad'})
+    p = st['paper']
+    if p['closed'] >= 3 and p['closed_early'] >= max(2, p['closed'] // 2):
+        out.append({'text': f"You closed {p['closed_early']} of {p['closed']} paper trades before they reached the stop or the target. Cutting trades early keeps wins tiny while full losses still happen. Try letting the plan play out.", 'n': p['closed'], 'kind': 'bad'})
+    if p['closed']:
+        out.append({'text': f"Your paper trading: {p['closed']} closed, {p['wins']} up, {p['losses']} down, total {('+' if p['pnl'] >= 0 else '-')}${abs(p['pnl']):,.2f}.", 'n': p['closed'], 'kind': 'good' if p['pnl'] > 0 else 'info'})
+    s = st['coach']['shadow']
+    if s['n']:
+        out.append({'text': f"Signals the coach held back: {s['wins']} of {s['n']} would have won ({s['total_R']:+.1f}R). " + ('The rules are saving you money so far.' if s['total_R'] < 0 else 'The rules may be too strict; the coach will relax them if this continues.'), 'n': s['n'], 'kind': 'good' if s['total_R'] < 0 else 'info'})
+    for x in out:
+        x['confidence'] = _conf(x['n'])
+    return out
+
+def rules_list(c=None):
+    c = c or load()
+    (r, out) = (c['rules'], [])
+    for (tf, v) in r['min_stop'].items():
+        out.append(f'On {tf} charts, skip setups whose stop is tighter than {v:g}% of the price.')
+    for (tf, v) in r['late_cutoff'].items():
+        out.append(f'On {tf} charts, no new entries after {v} (New York time).')
+    today = datetime.now().strftime('%Y-%m-%d')
+    for (t, until) in r['cooldown'].items():
+        if until >= today:
+            out.append(f'Cool-down: no {t} alerts until {until}.')
+    return out
+
+def _change(c, text, why, kind='add'):
+    c['history'].append({'ts': _now(), 'change': text, 'why': why, 'kind': kind})
+
+def auto_adjust():
+    c = load()
+    if not c['enabled']:
+        return []
+    rows = [r for r in journal() if r.get('status') in ('WIN', 'LOSS', 'EXPIRED')]
+    made = []
+    for tf in ('5m', '15m', '1h'):
+        tight = [r for r in rows if r.get('tf') == tf and (_stop_pct(r) or 99) < 1]
+        g = _agg(tight)
+        if g['n'] >= 5 and g['win_rate'] < 20 and (c['rules']['min_stop'].get(tf, 0) < 1.0):
+            c['rules']['min_stop'][tf] = 1.0
+            why = f"{g['n'] - g['wins']} of {g['n']} {tf} signals with a stop under 1% lost ({g['total_R']:+.1f}R)."
+            _change(c, f'New rule: on {tf} charts, skip setups with a stop tighter than 1%.', why)
+            made.append(f'New rule for {tf}: skip stops tighter than 1%. Why: {why}')
+        late = [r for r in rows if r.get('tf') == tf and (_minute(r) or 0) >= 930]
+        g = _agg(late)
+        if g['n'] >= 4 and g['win_rate'] < 20 and (tf not in c['rules']['late_cutoff']):
+            c['rules']['late_cutoff'][tf] = '15:30'
+            why = f"{g['n'] - g['wins']} of {g['n']} {tf} signals after 3:30 pm lost."
+            _change(c, f'New rule: on {tf} charts, no new entries after 3:30 pm.', why)
+            made.append(f'New rule for {tf}: no entries after 3:30 pm. Why: {why}')
+    since = (datetime.now() - timedelta(days=14)).strftime('%Y-%m-%d')
+    by_t = defaultdict(list)
+    for r in rows:
+        if str(r.get('time', ''))[:10] >= since:
+            by_t[r['ticker']].append(r)
+    today = datetime.now().strftime('%Y-%m-%d')
+    for (t, rs) in by_t.items():
+        g = _agg(rs)
+        if g['n'] >= 3 and g['wins'] == 0 and (c['rules']['cooldown'].get(t, '') < today):
+            until = (datetime.now() + timedelta(days=7)).strftime('%Y-%m-%d')
+            c['rules']['cooldown'][t] = until
+            _change(c, f'Cool-down: no {t} buy alerts until {until}.', f"{t} lost {g['n']} times in the last 2 weeks.")
+            made.append(f"{t} is on a 7-day cool-down after {g['n']} losses in a row.")
+    c['rules']['cooldown'] = {t: u for (t, u) in c['rules']['cooldown'].items() if u >= today}
+    for kind in ('min_stop', 'late_cutoff'):
+        for tf in list(c['rules'][kind]):
+            held = [s for s in c['shadow'] if s.get('status') != 'OPEN' and s.get('tf') == tf and (s.get('rule') == kind)]
+            g = _agg(held)
+            if g['n'] >= 10 and g['win_rate'] > BREAKEVEN + 5 and (g['total_R'] > 0):
+                del c['rules'][kind][tf]
+                why = f"the {g['n']} signals it held back would have won {g['win_rate']:.0f}% ({g['total_R']:+.1f}R)."
+                _change(c, f"Removed the {tf} {('stop-size' if kind == 'min_stop' else 'late-entry')} rule.", why, 'remove')
+                made.append(f'Removed a {tf} rule because {why}')
+    c['stats']['last_adjust'] = _now()
+    save(c)
+    return made
+
+def undo_all():
+    c = load()
+    c['rules'] = {'min_stop': {}, 'late_cutoff': {}, 'cooldown': {}}
+    _change(c, 'All coach rules removed by you.', 'you pressed Undo', 'remove')
+    save(c)
+
+def set_enabled(on):
+    c = load()
+    c['enabled'] = bool(on)
+    save(c)
+
+def cooled(ticker):
+    c = load()
+    u = c['rules']['cooldown'].get(str(ticker).upper())
+    return u if c['enabled'] and u and (u >= datetime.now().strftime('%Y-%m-%d')) else None
+
+def _tf_of(d):
+    try:
+        mins = int(round(pd_median_minutes(d.index)))
+    except Exception:
+        return None
+    return {5: '5m', 15: '15m', 60: '1h'}.get(mins, '1d' if mins >= 1440 else None)
+
+def pd_median_minutes(idx):
+    diffs = [(idx[i + 1] - idx[i]).total_seconds() / 60 for i in range(max(0, len(idx) - 40), len(idx) - 1)]
+    diffs = sorted((x for x in diffs if x > 0))
+    return diffs[len(diffs) // 2]
+
+def install():
+    import engine as E
+    if not hasattr(E, 'make_verdict') or getattr(E.make_verdict, '_coach', False):
+        return
+    original = E.make_verdict
+
+    def make_verdict(d, p, days_to_earnings=None):
+        v = original(d, p, days_to_earnings)
+        try:
+            c = load()
+            if v['action'] != 'BUY' or not c['enabled'] or (not v.get('plan')):
+                return v
+            tf = _tf_of(d)
+            (why, rule) = (None, None)
+            floor = c['rules']['min_stop'].get(tf)
+            if floor and v['plan']['stop_pct'] < floor:
+                (why, rule) = (f"the stop would be only {v['plan']['stop_pct']:.2f}% away (my rule for {tf}: at least {floor:g}%)", 'min_stop')
+            cut = c['rules']['late_cutoff'].get(tf)
+            t = v['time']
+            if not why and cut and hasattr(t, 'hour') and (f'{t.hour:02d}:{t.minute:02d}' >= cut):
+                (why, rule) = (f"it's after {cut}, and late {tf} entries have been losing", 'late_cutoff')
+            if why:
+                v = dict(v)
+                v['coach_blocked'] = {'rule': rule, 'tf': tf, 'entry': float(v['plan']['entry']), 'stop': float(v['plan']['stop']), 'target': float(v['plan']['target']), 'time': str(t)}
+                v['action'] = 'WAIT'
+                v['headline'] = f'🧠 Coach held this back: {why}.'
+                v['reasons'] = list(v['reasons']) + [dict(label='🧠 Coach rule (learned from past results)', ok=False, detail=why)]
+        except Exception:
+            pass
+        return v
+    make_verdict._coach = True
+    E.make_verdict = make_verdict
+
+def log_shadow(ticker, v):
+    b = v.get('coach_blocked')
+    if not b:
+        return
+    c = load()
+    key = f"{ticker}|{b['tf']}|{b['time']}"
+    if any((s['key'] == key for s in c['shadow'])):
+        return
+    c['shadow'].append(dict(b, key=key, ticker=str(ticker).upper(), status='OPEN', r=None))
+    save(c)
+
+def grade_shadow(periods):
+    import pandas as pd
+    import engine as E
+    c = load()
+    (cache, changed) = ({}, False)
+    for s in c['shadow']:
+        if s.get('status') != 'OPEN':
+            continue
+        k = (s['ticker'], s['tf'])
+        if k not in cache:
+            try:
+                cache[k] = E.drop_partial(E.load_prices(s['ticker'], periods[s['tf']], s['tf']), s['tf'])
+            except Exception:
+                cache[k] = None
+        df = cache[k]
+        if df is None or df.empty:
+            continue
+        ts = pd.Timestamp(s['time'])
+        if df.index.tz is not None and ts.tzinfo is None:
+            ts = ts.tz_localize(df.index.tz)
+        after = df[df.index > ts].iloc[:MAX_BARS]
+        risk = s['entry'] - s['stop']
+        if risk <= 0 or after.empty:
+            continue
+        out = None
+        for (_, bar) in after.iterrows():
+            if bar.low <= s['stop']:
+                out = ('LOSS', -1.0)
+                break
+            if bar.high >= s['target']:
+                out = ('WIN', (s['target'] - s['entry']) / risk)
+                break
+        if out is None and len(after) >= MAX_BARS:
+            out = ('EXPIRED', (float(after.close.iloc[-1]) - s['entry']) / risk)
+        if out:
+            (s['status'], s['r']) = (out[0], round(float(out[1]), 3))
+            changed = True
+    if changed:
+        save(c)
+
+def self_develop(periods):
+    done = []
+    try:
+        import learner
+        learner.resolve_open(periods)
+        done.append('graded old signals')
+    except Exception:
+        pass
+    try:
+        grade_shadow(periods)
+    except Exception:
+        pass
+    try:
+        done += auto_adjust()
+    except Exception:
+        pass
+    return done
+
+def report_md(st=None):
+    st = st or stats()
+    (lv, o) = (st['level'], st['overall'])
+    bar = '█' * int(lv['progress'] * 10) + '░' * (10 - int(lv['progress'] * 10))
+    out = [f"### 🧠 How much I've learned: Level {lv['number']} · {lv['name']}", f'`{bar}` ' + (f"{lv['to_next']} more graded signals to reach the next level." if lv['next_at'] else 'Top level.'), f"{lv['meaning']}. Experience points: **{lv['xp']}**.", '', f"- **Days in use:** {st['days_active']}" + (f" (since {st['first_day']})" if st['first_day'] else ''), f"- **Signals I saved and checked:** {st['signals_logged']} saved, {st['signals_graded']} graded, {st['signals_waiting']} still waiting", f"- **Track record:** {o['wins']} wins of {o['n']} ({o['win_rate']:.0f}%), total {o['total_R']:+.1f}R" if o['n'] else '- **Track record:** nothing graded yet', f"- **Your paper trades:** {st['paper']['closed']} closed, total {('+' if st['paper']['pnl'] >= 0 else '-')}\\${abs(st['paper']['pnl']):,.2f}", f"- **Internet:** {st['brain']['lookups']} look-ups, {st['brain']['self_updates']} self-updates; you taught me {st['brain']['taught']} thing(s) and rated {st['brain']['ratings']} answer(s)", f"- **Notifications:** {st['notifier']['checks']} checks, {st['notifier']['sent']} sent", f"- **Quiz:** {st['quiz']['right']} right of {st['quiz']['asked']}"]
+    rules = st['coach']['rules']
+    out += ['', '**Rules I made for myself**'] + ([f'- {r}' for r in rules] if rules else ['- None yet: not enough evidence.'])
+    out += ['', '**Lessons so far**']
+    icon = {'good': '✅', 'bad': '⚠️', 'info': 'ℹ️'}
+    out += [f"- {icon[x['kind']]} {x['text'].replace('$', chr(92) + '$')} *({x['confidence']}, {x['n']} result(s))*" for x in lessons(st)]
+    out.append('\n*R = profit in units of the risk taken. Fewer than 30 results is too few to trust, so treat these as hints.*')
+    return '\n'.join(out)
