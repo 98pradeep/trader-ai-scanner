@@ -39,10 +39,32 @@ def load_prices(ticker: str, period: str, interval: str) -> pd.DataFrame:
     df = df.rename(columns=str.lower)[['open', 'high', 'low', 'close', 'volume']].dropna()
     return df[df['high'] >= df['low']]
 
+def align_live(df: pd.DataFrame, interval: str) -> pd.DataFrame:
+    mins = INTERVAL_MIN.get(interval)
+    if df.empty or not mins or mins >= 1440:
+        return df
+    start = df.index[-1].floor(f'{mins}min')
+    if start == df.index[-1]:
+        return df
+    df = df.copy()
+    last = df.iloc[-1]
+    if len(df) > 1 and df.index[-2] == start:
+        i = df.index[-2]
+        df.loc[i, 'high'] = max(df.loc[i, 'high'], last['high'])
+        df.loc[i, 'low'] = min(df.loc[i, 'low'], last['low'])
+        df.loc[i, 'close'] = last['close']
+        df.loc[i, 'volume'] = max(df.loc[i, 'volume'], last['volume'])
+        return df.iloc[:-1]
+    idx = df.index.tolist()
+    idx[-1] = start
+    df.index = pd.DatetimeIndex(idx, tz=df.index.tz)
+    return df
+
 def drop_partial(df: pd.DataFrame, interval: str) -> pd.DataFrame:
     mins = INTERVAL_MIN.get(interval)
     if df.empty or not mins or mins >= 1440:
         return df
+    df = align_live(df, interval)
     now = pd.Timestamp.now(tz=df.index.tz) if df.index.tz is not None else pd.Timestamp.now()
     if now < df.index[-1] + pd.Timedelta(minutes=mins):
         return df.iloc[:-1]
