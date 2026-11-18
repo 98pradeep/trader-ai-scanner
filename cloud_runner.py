@@ -86,7 +86,24 @@ def loop(notifier):
         once(notifier, force=True)
         wait = every - (time.time() % every)          # wake on the next 5-minute mark
         time.sleep(wait + every if wait < 30 else wait)
-    print("Reached the time limit for one run; the next scheduled run carries on.", flush=True)
+    print("Reached GitHub's time limit for one run.", flush=True)
+    start_next_run()
+
+
+def start_next_run():
+    """Ask GitHub to start a fresh run right away, so scanning continues until the close."""
+    tok, repo = os.environ.get("GITHUB_TOKEN"), os.environ.get("GITHUB_REPOSITORY")
+    if not tok or not repo:
+        print("Can't start the next run myself (no GITHUB_TOKEN); the hourly backup will.", flush=True)
+        return
+    import requests
+    try:
+        r = requests.post(f"https://api.github.com/repos/{repo}/actions/workflows/scanner.yml/dispatches",
+                          headers={"Authorization": f"Bearer {tok}", "Accept": "application/vnd.github+json"},
+                          json={"ref": "main"}, timeout=20)
+        print("Started the next run:", "OK" if r.status_code == 204 else f"HTTP {r.status_code} {r.text[:200]}", flush=True)
+    except Exception as e:
+        print("Couldn't start the next run:", e, flush=True)
 
 
 if __name__ == "__main__":
