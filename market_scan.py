@@ -14,7 +14,7 @@ STATE = DATA / 'market_scan.json'
 UA = {'User-Agent': 'Mozilla/5.0 (Macintosh; Intel Mac OS X 10_15_7) AppleWebKit/537.36 (KHTML, like Gecko) Chrome/126.0 Safari/537.36', 'Accept': 'application/json, text/plain, */*', 'Accept-Language': 'en-US,en;q=0.9', 'Origin': 'https://www.nasdaq.com', 'Referer': 'https://www.nasdaq.com/'}
 NASDAQ = 'https://api.nasdaq.com/api/screener/stocks'
 SKIP_NAME = re.compile('\\b(warrants?|units?|rights?|preferred|depositary shares? representing|notes? due|debentures?|trust preferred|fund|etf|etn|index|%)\\b', re.I)
-PERIOD_5M = '15d'
+PERIOD_5M = '30d'
 
 def _read(path, default):
     try:
@@ -135,7 +135,7 @@ def scan(cfg, on_verdict=None, extra=()):
     import picker as K
     import skills as S
     tf = cfg['timeframe'] if cfg['timeframe'] in A.TF_PERIOD else '15m'
-    period = PERIOD_5M if tf == '5m' else A.TF_PERIOD[tf]
+    period = PERIOD_5M if tf == '5m' else '7d' if tf == '1m' else A.TF_PERIOD[tf]
     budget = S.load_budget()
     (account, risk) = (float(budget['account']), float(budget['risk_pct']))
     (max_pos, frac) = (float(cfg.get('max_position_pct', 50)), bool(cfg.get('fractional')))

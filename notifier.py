@@ -156,8 +156,17 @@ def trade_plan_text(t, plan, r, tf, move=''):
     lvl = r.get('_lvl') or {}
     guard = max([x for x in (lvl.get('vwap'), lvl.get('ema20')) if x and x < e] or [s])
     half = math.floor(plan['qty'] / 2 * 10000) / 10000
-    lines = [f"ENTRY: buy {plan['qty']:g} shares near {_money(e)} (about {_money(r['Cost $'])}). Don't chase above {_money(e + 0.25 * R)}.", f"STOP: {_money(s)} ({R / e * 100:.1f}% below). If hit, sell: you lose about {_money(r['Max loss $'])}.", f'TARGET 1: {_money(g)}: sell half ({half:g} sh), then move the stop to {_money(e)} (breakeven).', f'TARGET 2: {_money(g2)}: sell the rest.', f"EXIT EARLY if a {tf} candle closes below {_money(guard)} (VWAP / 20 EMA) or the stock hasn't moved in an hour.", 'Day trade: be out by 3:50 pm.' if tf in ('5m', '15m') else 'Check it again before the close.', f"{tf} chart, {r['Rules met']} rules met.{move} Tap 'I bought it' and I'll watch the exit for you. An idea, not a guarantee."]
-    return ('\n'.join(lines), f'🟢 BUY {t} near {_money(e)} · stop {_money(s)} · target {_money(g)}')
+    when = ''
+    try:
+        import pandas as pd
+        t0 = pd.Timestamp(r.get('_time'))
+        mins = {'1m': 1, '5m': 5, '15m': 15, '1h': 60}.get(tf)
+        if mins:
+            when = f'Based on the {tf} candle {t0:%H:%M}-{t0 + pd.Timedelta(minutes=mins):%H:%M} ET (finished candle). '
+    except Exception:
+        pass
+    lines = [when + "Same numbers as the app's Signal tab with Live switched off." if when else '', f"ENTRY: buy {plan['qty']:g} shares near {_money(e)} (about {_money(r['Cost $'])}). Don't chase above {_money(e + 0.25 * R)}.", f"STOP: {_money(s)} ({R / e * 100:.1f}% below). If hit, sell: you lose about {_money(r['Max loss $'])}.", f'TARGET 1: {_money(g)}: sell half ({half:g} sh), then move the stop to {_money(e)} (breakeven).', f'TARGET 2: {_money(g2)}: sell the rest.', f"EXIT EARLY if a {tf} candle closes below {_money(guard)} (VWAP / 20 EMA) or the stock hasn't moved in an hour.", 'Day trade: be out by 3:50 pm.' if tf in ('5m', '15m') else 'Check it again before the close.', f"{tf} chart, {r['Rules met']} rules met.{move} Tap 'I bought it' and I'll watch the exit for you. An idea, not a guarantee."]
+    return ('\n'.join((x for x in lines if x)), f'🟢 BUY {t} near {_money(e)} · stop {_money(s)} · target {_money(g)}')
 
 def read_commands(cfg, state):
     import requests
@@ -347,7 +356,7 @@ def render_panel(st):
         mac = c1.checkbox('Notify on this Mac', cfg['mac'], key='nt_mac')
         every = c2.select_slider('Check every (minutes)', [5, 10, 15, 30, 60], cfg['every_min'] if cfg['every_min'] in (5, 10, 15, 30, 60) else 15, key='nt_every')
         (c3, c4) = st.columns(2)
-        tfs = ['5m', '15m', '1h', '1d']
+        tfs = ['1m', '5m', '15m', '1h', '1d']
         tf = c3.selectbox('Candle size to watch', tfs, tfs.index(cfg['timeframe']) if cfg['timeframe'] in tfs else 1, key='nt_tf')
         hours = c4.checkbox('Only while the US market is open', cfg['market_hours_only'], key='nt_hours')
         frac = st.checkbox('My broker allows fractional shares', cfg['fractional'], key='nt_frac', help='With a small account, whole shares of pricey stocks will not fit. Fractional shares let more stocks qualify.')
@@ -377,7 +386,7 @@ def render_panel(st):
             st.code(topic)
             st.caption('Keep this name private: anyone who knows it could read your notifications. They pass through the free public ntfy.sh service and contain the ticker, prices and share count.')
             st.markdown(f'**Tell me what you bought or sold from your iPhone:** open [ntfy.sh/{topic}-cmd](https://ntfy.sh/{topic}-cmd) in Safari (tip: Share > Add to Home Screen) and send messages like `bought 10 F at 11.20`, `sold F`, `stop F 10.80`, `list`. Or tap **I bought it** under a BUY alert.')
-            cloud = st.checkbox("☁️ My cloud copy sends the phone alerts (so this Mac doesn't send duplicates)", cfg.get('cloud', False), key='nt_cloud')
+            cloud = st.checkbox("☁️ My cloud copy sends the phone alerts (so this Mac doesn't send duplicates)", cfg.get('cloud', False), key=f"nt_cloud_{bool(cfg.get('cloud'))}")
             if cloud != cfg.get('cloud', False):
                 cfg['cloud'] = cloud
                 save_cfg(cfg)
