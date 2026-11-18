@@ -1,4 +1,3 @@
-"""Market filters: stocks in play, earnings guard, market mood. Full commented version lives on the Mac."""
 from __future__ import annotations
 import json
 import math
@@ -85,6 +84,8 @@ def earnings_note(t: str, cal=None):
     t = t.upper()
     if cal['prev'].get(t) == 'after':
         return ('news', "reported earnings after yesterday's close")
+    if cal['prev'].get(t) == '?':
+        return ('news', 'reported earnings yesterday')
     w = cal['today'].get(t)
     if w == 'pre':
         return ('news', 'reported earnings this morning')
@@ -201,7 +202,7 @@ def market_mood(max_age=600) -> dict:
             warn.append(f'VIX fear index {vix:.0f}')
     if 'spy' not in info and 'qqq' not in info:
         info.update(mood='unknown', text="Couldn't read SPY/QQQ, so the market filter is off this scan.")
-    elif bad or len(warn) >= 3:
+    elif bad or (len(warn) >= 3 and min(info.get('spy', 0), info.get('qqq', 0)) <= -0.7):
         info.update(mood='red', text='🔴 Risk-off market (' + ', '.join(bad + warn) + '). New BUY alerts paused.')
     elif warn:
         info.update(mood='yellow', text='🟡 Shaky market (' + ', '.join(warn) + '). Only the strongest in-play setups get through.')
@@ -240,3 +241,56 @@ def summary_md() -> str:
         pass
     lines.append(f'**Stocks in Play rule:** a BUY alert needs volume ≥ {RVOL_IN_PLAY:g}x normal for the time of day, a gap ≥ {GAP_IN_PLAY:g}%, or fresh earnings news. On yellow days: volume ≥ {RVOL_STRONG:g}x, gap ≥ 5% or earnings.')
     return '\n\n'.join(lines)
+EDGE_LOG = DATA / 'edge_log.json'
+
+def log_buys(rows, tf, mood):
+    try:
+        lg = _read(EDGE_LOG, {})
+        m = (mood or {}).get('mood', 'unknown')
+        for r in rows:
+            if r.get('Signal') != 'BUY':
+                continue
+            pl = r.get('_play') or {}
+            lg[f"{r['Ticker']}|{tf}|{r.get('_time')}"] = {'in_play': bool(pl.get('in_play')), 'rvol': pl.get('rvol'), 'gap': pl.get('gap'), 'earn': pl.get('earn'), 'mood': m}
+        if len(lg) > 3000:
+            lg = dict(list(lg.items())[-3000:])
+        EDGE_LOG.write_text(json.dumps(lg))
+    except Exception:
+        pass
+
+def self_check(journal_rows):
+    lg = _read(EDGE_LOG, {})
+    graded = sorted([dict(r, **lg[r['key']]) for r in journal_rows if r.get('key') in lg and r.get('status') in ('WIN', 'LOSS', 'EXPIRED')], key=lambda r: str(r.get('time')))
+
+    def agg(rs):
+        n = len(rs)
+        w = sum((1 for r in rs if (r.get('r') or 0) > 0))
+        R = sum((float(r.get('r') or 0) for r in rs))
+        return {'n': n, 'win_rate': round(w / n * 100, 1) if n else 0.0, 'total_R': round(R, 2), 'avg_R': round(R / n, 2) if n else 0.0}
+    out = {'graded': len(graded)}
+    for (name, test) in (('in_play', lambda r: r['in_play']), ('green_mood', lambda r: r['mood'] == 'green')):
+        (yes, no) = ([r for r in graded if test(r)], [r for r in graded if not test(r)])
+        half = len(graded) // 2
+        (old, new) = (graded[:half], graded[half:])
+        out[name] = {'yes': agg(yes), 'no': agg(no), 'older': (agg([r for r in old if test(r)]), agg([r for r in old if not test(r)])), 'newer': (agg([r for r in new if test(r)]), agg([r for r in new if not test(r)]))}
+        (y, n_) = (out[name]['yes'], out[name]['no'])
+        enough = y['n'] >= 15 and n_['n'] >= 15
+        ((oy, on), (ny, nn)) = (out[name]['older'], out[name]['newer'])
+        if not enough:
+            verdict = f"not enough graded signals yet ({y['n']} vs {n_['n']}, need 15 each)"
+        elif oy['avg_R'] > on['avg_R'] and ny['avg_R'] > nn['avg_R']:
+            verdict = 'helping: the filtered-in signals did better in both the older and the newer half'
+        elif oy['avg_R'] < on['avg_R'] and ny['avg_R'] < nn['avg_R']:
+            verdict = 'NOT helping: the signals it filters out did better in both halves; consider switching it off'
+        else:
+            verdict = 'mixed: it helped in one half and not the other; keep watching'
+        out[name]['verdict'] = verdict
+    return out
+
+def self_check_md(journal_rows):
+    r = self_check(journal_rows)
+    lines = [f"**Filter check** ({r['graded']} graded BUY signals with filter data)"]
+    for (name, label) in (('in_play', 'Stocks in Play'), ('green_mood', 'Green market mood')):
+        x = r[name]
+        lines.append(f"- {label}: passed {x['yes']['n']} ({x['yes']['win_rate']:.0f}% wins, {x['yes']['avg_R']:+.2f}R avg) vs filtered out {x['no']['n']} ({x['no']['win_rate']:.0f}% wins, {x['no']['avg_R']:+.2f}R avg): {x['verdict']}.")
+    return '\n'.join(lines)

@@ -1,4 +1,3 @@
-"""coach.py - how Trader AI develops itself, and how much it has learned so far. (compact cloud copy: the readable version is in your Mac's trader folder)"""
 import json
 import math
 import os
@@ -185,6 +184,34 @@ def rules_list(c=None):
 
 def _change(c, text, why, kind='add'):
     c['history'].append({'ts': _now(), 'change': text, 'why': why, 'kind': kind})
+WF_MIN = 8
+WF_TEST = 0.4
+
+def _sort_time(rs):
+    return sorted(rs, key=lambda r: str(r.get('time', '')))
+
+def _evidence(kind, tf, rows, c):
+    if kind == 'min_stop':
+        real = [r for r in rows if r.get('tf') == tf and (_stop_pct(r) or 99) < 1]
+    else:
+        real = [r for r in rows if r.get('tf') == tf and (_minute(r) or 0) >= 930]
+    held = [x for x in c['shadow'] if x.get('status') not in (None, 'OPEN') and x.get('tf') == tf and (x.get('rule') == kind)]
+    (seen, out) = (set(), [])
+    for r in real + held:
+        k = r.get('key') or (r.get('ticker'), r.get('time'))
+        if k not in seen:
+            seen.add(k)
+            out.append(r)
+    return _sort_time(out)
+
+def walk_forward(rs):
+    rs = _sort_time(rs)
+    n_test = max(3, int(round(len(rs) * WF_TEST)))
+    (train, test) = (rs[:-n_test], rs[-n_test:])
+    return (_agg(train), _agg(test), _agg(rs))
+
+def _passes(tr, te, al):
+    return al['n'] >= WF_MIN and tr['win_rate'] < 20 and (te['win_rate'] < BREAKEVEN - 5) and (te['total_R'] < 0) and (al['win_rate'] < 25)
 
 def auto_adjust():
     c = load()
@@ -192,21 +219,20 @@ def auto_adjust():
         return []
     rows = [r for r in journal() if r.get('status') in ('WIN', 'LOSS', 'EXPIRED')]
     made = []
-    for tf in ('5m', '15m', '1h'):
-        tight = [r for r in rows if r.get('tf') == tf and (_stop_pct(r) or 99) < 1]
-        g = _agg(tight)
-        if g['n'] >= 5 and g['win_rate'] < 20 and (c['rules']['min_stop'].get(tf, 0) < 1.0):
-            c['rules']['min_stop'][tf] = 1.0
-            why = f"{g['n'] - g['wins']} of {g['n']} {tf} signals with a stop under 1% lost ({g['total_R']:+.1f}R)."
-            _change(c, f'New rule: on {tf} charts, skip setups with a stop tighter than 1%.', why)
-            made.append(f'New rule for {tf}: skip stops tighter than 1%. Why: {why}')
-        late = [r for r in rows if r.get('tf') == tf and (_minute(r) or 0) >= 930]
-        g = _agg(late)
-        if g['n'] >= 4 and g['win_rate'] < 20 and (tf not in c['rules']['late_cutoff']):
-            c['rules']['late_cutoff'][tf] = '15:30'
-            why = f"{g['n'] - g['wins']} of {g['n']} {tf} signals after 3:30 pm lost."
-            _change(c, f'New rule: on {tf} charts, no new entries after 3:30 pm.', why)
-            made.append(f'New rule for {tf}: no entries after 3:30 pm. Why: {why}')
+    since_map = c['stats'].setdefault('rule_since', {})
+    for tf in ('1m', '5m', '15m', '1h'):
+        for (kind, label) in (('min_stop', 'a stop tighter than 1%'), ('late_cutoff', 'an entry after 3:30 pm')):
+            if tf in c['rules'][kind]:
+                continue
+            (tr, te, al) = walk_forward(_evidence(kind, tf, rows, c))
+            if not _passes(tr, te, al):
+                continue
+            c['rules'][kind][tf] = 1.0 if kind == 'min_stop' else '15:30'
+            since_map[f'{kind}:{tf}'] = _now()
+            why = f"{al['n'] - al['wins']} of {al['n']} {tf} signals with {label} lost ({al['total_R']:+.1f}R). Walk-forward check: learned on the older {tr['n']} ({tr['win_rate']:.0f}% wins), then confirmed on the {te['n']} newest it hadn't seen ({te['win_rate']:.0f}% wins)."
+            text = f'New rule: on {tf} charts, skip setups with a stop tighter than 1%.' if kind == 'min_stop' else f'New rule: on {tf} charts, no new entries after 3:30 pm.'
+            _change(c, text, why)
+            made.append(f'{text} Why: {why}')
     since = (datetime.now() - timedelta(days=14)).strftime('%Y-%m-%d')
     by_t = defaultdict(list)
     for r in rows:
@@ -223,10 +249,12 @@ def auto_adjust():
     c['rules']['cooldown'] = {t: u for (t, u) in c['rules']['cooldown'].items() if u >= today}
     for kind in ('min_stop', 'late_cutoff'):
         for tf in list(c['rules'][kind]):
-            held = [s for s in c['shadow'] if s.get('status') != 'OPEN' and s.get('tf') == tf and (s.get('rule') == kind)]
+            since = c['stats'].get('rule_since', {}).get(f'{kind}:{tf}', '')
+            held = [s for s in c['shadow'] if s.get('status') != 'OPEN' and s.get('tf') == tf and (s.get('rule') == kind) and (str(s.get('logged', '')) >= since)]
             g = _agg(held)
             if g['n'] >= 10 and g['win_rate'] > BREAKEVEN + 5 and (g['total_R'] > 0):
                 del c['rules'][kind][tf]
+                c['stats'].setdefault('rule_since', {}).pop(f'{kind}:{tf}', None)
                 why = f"the {g['n']} signals it held back would have won {g['win_rate']:.0f}% ({g['total_R']:+.1f}R)."
                 _change(c, f"Removed the {tf} {('stop-size' if kind == 'min_stop' else 'late-entry')} rule.", why, 'remove')
                 made.append(f'Removed a {tf} rule because {why}')
@@ -255,7 +283,7 @@ def _tf_of(d):
         mins = int(round(pd_median_minutes(d.index)))
     except Exception:
         return None
-    return {5: '5m', 15: '15m', 60: '1h'}.get(mins, '1d' if mins >= 1440 else None)
+    return {1: '1m', 5: '5m', 15: '15m', 60: '1h'}.get(mins, '1d' if mins >= 1440 else None)
 
 def pd_median_minutes(idx):
     diffs = [(idx[i + 1] - idx[i]).total_seconds() / 60 for i in range(max(0, len(idx) - 40), len(idx) - 1)]
@@ -303,7 +331,7 @@ def log_shadow(ticker, v):
     key = f"{ticker}|{b['tf']}|{b['time']}"
     if any((s['key'] == key for s in c['shadow'])):
         return
-    c['shadow'].append(dict(b, key=key, ticker=str(ticker).upper(), status='OPEN', r=None))
+    c['shadow'].append(dict(b, key=key, ticker=str(ticker).upper(), status='OPEN', r=None, logged=_now()))
     save(c)
 
 def grade_shadow(periods):
@@ -362,6 +390,19 @@ def self_develop(periods):
         done += auto_adjust()
     except Exception:
         pass
+    try:
+        import edge
+        chk = edge.self_check(journal())
+        c = load()
+        seen = c['stats'].setdefault('filter_verdicts', {})
+        for (name, label) in (('in_play', 'Stocks in Play filter'), ('green_mood', 'market mood filter')):
+            v = chk[name]['verdict']
+            if not v.startswith('not enough') and seen.get(name) != v.split(':')[0]:
+                seen[name] = v.split(':')[0]
+                done.append(f'Walk-forward check of the {label}: {v}.')
+        save(c)
+    except Exception:
+        pass
     return done
 
 def report_md(st=None):
@@ -374,5 +415,21 @@ def report_md(st=None):
     out += ['', '**Lessons so far**']
     icon = {'good': '✅', 'bad': '⚠️', 'info': 'ℹ️'}
     out += [f"- {icon[x['kind']]} {x['text'].replace('$', chr(92) + '$')} *({x['confidence']}, {x['n']} result(s))*" for x in lessons(st)]
+    out += ['', '**Walk-forward check** (a pattern only becomes a rule if it also lost on newer signals it never learned from)']
+    try:
+        c = load()
+        rows = [r for r in journal() if r.get('status') in ('WIN', 'LOSS', 'EXPIRED')]
+        for tf in ('1m', '5m', '15m', '1h'):
+            for (kind, label) in (('min_stop', 'stops under 1%'), ('late_cutoff', 'entries after 3:30 pm')):
+                ev = _evidence(kind, tf, rows, c)
+                if len(ev) < 4:
+                    continue
+                (tr, te, al) = walk_forward(ev)
+                state = 'rule ON' if tf in c['rules'][kind] else 'no rule'
+                out.append(f"- {tf} {label}: learned on {tr['n']} ({tr['win_rate']:.0f}% wins), tested on {te['n']} newer ({te['win_rate']:.0f}% wins, {te['total_R']:+.1f}R) → {state}")
+        import edge
+        out += ['', edge.self_check_md(journal())]
+    except Exception:
+        pass
     out.append('\n*R = profit in units of the risk taken. Fewer than 30 results is too few to trust, so treat these as hints.*')
     return '\n'.join(out)

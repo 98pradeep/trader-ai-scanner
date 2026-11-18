@@ -142,6 +142,8 @@ def find_buys(cfg):
         mood = edge.market_mood()
     except Exception:
         (edge, mood) = (None, {})
+    if edge is not None:
+        edge.log_buys(res['rows'], tf, mood)
     for r in res['rows']:
         if r['Signal'] != 'BUY' or r.get('Risk check') == 'FAIL' or cooled(r['Ticker']):
             continue
@@ -158,6 +160,14 @@ def find_buys(cfg):
         pl = r.get('_play') or {}
         if pl.get('in_play'):
             body = '🔥 In play: ' + pl['why'] + '.\n' + body
+        if len(events) < 6:
+            try:
+                import insiders
+                ins = insiders.note(t)
+                if ins:
+                    body = ins + '\n' + body
+            except Exception:
+                pass
         if pl.get('earn') == 'soon':
             body = '⚠️ ' + pl['earn_text'].capitalize() + ": big overnight gap risk, don't hold it past the close.\n" + body
         events.append({'key': f'BUY:{t}:{tf}:{now_ny:%Y-%m-%d}:{now_ny.hour // 2}', 'kind': 'BUY', 'ticker': t, 'tags': ['green_circle'], 'click': f'https://www.tradingview.com/chart/?symbol={t}', 'title': title, 'body': body, 'cmds': [{'label': 'I bought it', 'cmd': f"bought {plan['qty']:g} {t} at {plan['entry']:.4g} stop {plan['stop']:.4g} target {plan['target']:.4g}"}]})
