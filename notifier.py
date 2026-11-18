@@ -1,4 +1,3 @@
-"""notifier.py - 🔔 notifications for Trader AI. No API key, no account. (compact cloud copy: the readable version is in your Mac's trader folder)"""
 import json
 import math
 import os
@@ -15,7 +14,7 @@ DATA.mkdir(exist_ok=True)
 (CFG, STATE) = (DATA / 'notify.json', DATA / 'notified.json')
 NY = ZoneInfo('America/New_York')
 NTFY = 'https://ntfy.sh'
-DEFAULT = {'enabled': False, 'mac': True, 'phone_topic': '', 'every_min': 15, 'timeframe': '15m', 'market_hours_only': True, 'tickers': '', 'max_position_pct': 50, 'fractional': False, 'scan_mode': 'market', 'checks_per_scan': 120, 'cloud': False}
+DEFAULT = {'enabled': False, 'mac': True, 'phone_topic': '', 'every_min': 15, 'timeframe': '15m', 'market_hours_only': True, 'tickers': '', 'max_position_pct': 50, 'fractional': False, 'scan_mode': 'market', 'checks_per_scan': 120, 'cloud': False, 'edge_filters': True, 'in_play_only': True, 'mood_filter': True}
 _lock = threading.Lock()
 MAX_BUY_PUSH = 5
 _thread = None
@@ -137,17 +136,36 @@ def find_buys(cfg):
         cooled = coach.cooled
     except Exception:
         cooled = lambda t: None
-    events = []
+    (events, held) = ([], {})
+    try:
+        import edge
+        mood = edge.market_mood()
+    except Exception:
+        (edge, mood) = (None, {})
     for r in res['rows']:
         if r['Signal'] != 'BUY' or r.get('Risk check') == 'FAIL' or cooled(r['Ticker']):
             continue
+        if edge is not None:
+            (ok, why) = edge.allow(r, mood, cfg)
+            if not ok:
+                held[why] = held.get(why, 0) + 1
+                continue
         (t, plan) = (r['Ticker'], res['plans'][r['Ticker']])
         q = r.get('_q') or {}
         move = f" Today {q['c']:+.1f}%." if q.get('c') is not None and q.get('p') else ''
         now_ny = datetime.now(NY)
         (body, title) = trade_plan_text(t, plan, r, tf, move)
+        pl = r.get('_play') or {}
+        if pl.get('in_play'):
+            body = '🔥 In play: ' + pl['why'] + '.\n' + body
+        if pl.get('earn') == 'soon':
+            body = '⚠️ ' + pl['earn_text'].capitalize() + ": big overnight gap risk, don't hold it past the close.\n" + body
         events.append({'key': f'BUY:{t}:{tf}:{now_ny:%Y-%m-%d}:{now_ny.hour // 2}', 'kind': 'BUY', 'ticker': t, 'tags': ['green_circle'], 'click': f'https://www.tradingview.com/chart/?symbol={t}', 'title': title, 'body': body, 'cmds': [{'label': 'I bought it', 'cmd': f"bought {plan['qty']:g} {t} at {plan['entry']:.4g} stop {plan['stop']:.4g} target {plan['target']:.4g}"}]})
-    return (events, {'scanned': res['scanned'], 'no_data': len(res['failed']), 'seconds': res.get('seconds'), 'market': res.get('market')})
+    m = mood.get('mood')
+    if m in ('red', 'yellow'):
+        day = datetime.now(NY).strftime('%Y-%m-%d')
+        events.append({'key': f'MOOD:{day}:{m}', 'kind': 'MOOD', 'ticker': '', 'tags': ['warning'], 'title': '🔴 Market risk-off: BUY alerts paused' if m == 'red' else '🟡 Shaky market: fewer BUY alerts', 'body': mood.get('text', '') + ' Exit alerts for stocks you own keep working.'})
+    return (events, {'scanned': res['scanned'], 'no_data': len(res['failed']), 'seconds': res.get('seconds'), 'market': res.get('market'), 'held': held, 'mood': mood.get('mood')})
 
 def trade_plan_text(t, plan, r, tf, move=''):
     (e, s, g) = (float(plan['entry']), float(plan['stop']), float(plan['target']))
@@ -309,6 +327,10 @@ def check_once(cfg=None, force=False, notify=True):
             note = mk.get('note', 'Scan skipped.')
         else:
             note = f"Checked {info.get('scanned', 0)} stocks in {info.get('seconds', '?')}s: {sum((e['kind'] == 'BUY' for e in events))} BUY that fit your money, {sum((e['kind'] in ('SELL', 'ALERT') for e in events))} sell/alert, {len(new)} new."
+        if info.get('held'):
+            note += ' Held back: ' + ', '.join((f'{v} {k}' for (k, v) in info['held'].items())) + '.'
+        if info.get('mood'):
+            note += f" Market mood: {info['mood']}."
         if info.get('no_data'):
             note += f" No data: {info['no_data']}."
         if mk.get('limited'):
@@ -373,6 +395,15 @@ def render_panel(st):
                 pass
         else:
             tickers = st.text_input('Stocks to watch (space separated)', cfg['tickers'], key='nt_tickers')
+        st.markdown('**🎯 Smart filters (fewer, better alerts)**')
+        (f1, f2) = st.columns(2)
+        inplay = f1.checkbox('Only stocks in play today', cfg.get('in_play_only', True), key='nt_inplay', help="Volume at least 2x normal for the time of day, a gap of 3%+, or fresh earnings news. Research on 7,000+ US stocks found day-trade setups worked far better on these 'Stocks in Play'.")
+        moodf = f2.checkbox('Pause buys when the market is risk-off', cfg.get('mood_filter', True), key='nt_mood', help='Uses SPY, QQQ and the VIX fear index. Red = buy alerts paused, yellow = only the strongest setups.')
+        try:
+            import edge
+            st.caption(edge.market_mood().get('text', ''))
+        except Exception:
+            pass
         st.markdown('**📱 Phone (free, no account)**')
         topic = cfg['phone_topic']
         if not topic:
@@ -394,7 +425,7 @@ def render_panel(st):
                 cfg['phone_topic'] = ''
                 save_cfg(cfg)
                 st.rerun()
-        new_cfg = dict(cfg, enabled=on, mac=mac, every_min=every, timeframe=tf, market_hours_only=hours, fractional=frac, tickers=tickers.strip(), scan_mode='market' if mode == modes[0] else 'list', checks_per_scan=checks)
+        new_cfg = dict(cfg, enabled=on, mac=mac, every_min=every, timeframe=tf, market_hours_only=hours, fractional=frac, tickers=tickers.strip(), scan_mode='market' if mode == modes[0] else 'list', checks_per_scan=checks, in_play_only=inplay, mood_filter=moodf)
         if new_cfg != cfg:
             save_cfg(new_cfg)
             cfg = new_cfg

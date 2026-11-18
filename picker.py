@@ -1,4 +1,3 @@
-"""picker.py - finds stocks you can actually afford to trade with the money you have. (compact cloud copy: the readable version is in your Mac's trader folder)"""
 import math
 import pandas as pd
 import streamlit as st
@@ -65,6 +64,13 @@ def _check_one(t, px, tf, period, p, b, account, risk_pct, max_pos_pct, fraction
         row = {'Ticker': t, 'Signal': v['action'], 'Price': round(float(v['last'].close), 2), 'Shares': sz['qty'], 'Cost $': round(sz['cost'], 2), 'Max loss $': round(sz['max_loss'], 2), 'Target gain $': round(sz['gain'], 2), 'Rules met': f'{ok}/{total}', 'Size limited by': sz['limit'], 'Risk check': passed, '_ok': ok, 'Why': v['headline']}
         lst = v['last']
         row['_time'] = str(v['time'])
+        try:
+            import edge
+            pl = edge.in_play(t, df)
+        except Exception:
+            pl = {}
+        row['_play'] = pl
+        row['In play'] = edge.play_label(pl) if pl else '-'
         row['_lvl'] = {k: None if math.isnan(float(getattr(lst, k, float('nan')))) else float(getattr(lst, k)) for k in ('vwap', 'ema20', 'ema9', 'atr')}
         return ('row', row, dict(qty=sz['qty'], entry=float(plan['entry']), stop=float(plan['stop']), target=float(plan['target'])))
     except Exception as e:
