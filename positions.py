@@ -1,4 +1,3 @@
-"""positions.py - stocks you REALLY bought, and when to sell them. Trader AI never places orders: you sell in your (compact cloud copy: the readable version is in your Mac's trader folder)"""
 import json
 import math
 import os
@@ -137,6 +136,15 @@ def _ev(p, key, title, body, urgent=False, tags=('chart_with_downwards_trend',),
         actions.append({'label': f"I sold {p['ticker']}", 'cmd': f"sold {p['ticker']}"})
     return {'key': k, 'kind': 'EXIT', 'ticker': p['ticker'], 'title': title, 'body': body, 'urgent': urgent, 'tags': list(tags), 'click': f"https://www.tradingview.com/chart/?symbol={p['ticker']}", 'cmds': actions, '_pos': p['id']}
 
+def pd_ts(iso, index):
+    import pandas as pd
+    t = pd.Timestamp(iso)
+    if index.tz is not None:
+        t = t.tz_localize(index.tz) if t.tzinfo is None else t.tz_convert(index.tz)
+    elif t.tzinfo is not None:
+        t = t.tz_convert('America/New_York').tz_localize(None)
+    return t
+
 def check(now=None):
     now = (now or datetime.now(NY)).astimezone(NY)
     rows = _read()
@@ -169,8 +177,15 @@ def check(now=None):
         if p['high'] >= p['price'] + r:
             new_stop = max(new_stop, p['price'])
         a = float(last.atr) if not math.isnan(last.atr) else None
-        if p.get('t1_done') and a:
-            new_stop = max(new_stop, p['high'] - 1.5 * a * 3)
+        if a and p['high'] >= p['price'] + r:
+            try:
+                since = d[d.index >= pd_ts(p.get('bought'), d.index)]
+                hh = max(float(since['high'].max()) if len(since) else p['high'], p['high'])
+            except Exception:
+                hh = p['high']
+            chand = hh - 4.5 * a
+            if chand < px - 0.5 * a:
+                new_stop = max(new_stop, chand)
         if new_stop > p['stop'] + 0.25 * r:
             (old, p['stop'], changed) = (p['stop'], round(new_stop, 4), True)
             events.append(_ev(p, f"raise:{p['stop']:.4f}", f"⬆️ {p['ticker']}: move your stop up to {_money(p['stop'])}", f"The trade is working. Raise your stop from {_money(old)} to {_money(p['stop'])} (in your broker too, if you use stop orders). {tag}", tags=('arrow_up',), sold_button=False))

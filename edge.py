@@ -106,7 +106,7 @@ def _ny_index(df):
     return idx
 
 def in_play(t: str, df, cal=None) -> dict:
-    res = {'in_play': False, 'rvol': None, 'gap': None, 'earn': None, 'earn_text': '', 'why': ''}
+    res = {'in_play': False, 'rvol': None, 'gap': None, 'chg': None, 'rs': None, 'earn': None, 'earn_text': '', 'why': ''}
     try:
         import pandas as pd
         if df is None or len(df) < 20:
@@ -133,6 +133,10 @@ def in_play(t: str, df, cal=None) -> dict:
             first = float(tday['open'].iloc[0])
             if prev_close > 0:
                 res['gap'] = round((first / prev_close - 1) * 100, 2)
+                res['chg'] = round((float(tday['close'].iloc[-1]) / prev_close - 1) * 100, 2)
+                spy = market_mood().get('spy')
+                if spy is not None:
+                    res['rs'] = round(res['chg'] - float(spy), 2)
     except Exception:
         pass
     (kind, text) = earnings_note(t, cal)
@@ -145,6 +149,8 @@ def in_play(t: str, df, cal=None) -> dict:
     if kind == 'news':
         why.append(text)
     res['in_play'] = bool(why)
+    if res.get('rs') is not None and why:
+        why.append(f"{('beating' if res['rs'] >= 0 else 'lagging')} SPY by {abs(res['rs']):.1f}%")
     res['why'] = ', '.join(why) if why else f"normal day (volume {res['rvol']:.1f}x)" if res['rvol'] is not None else 'normal day'
     return res
 
@@ -169,11 +175,19 @@ def _daily(sym):
         return datafix.yahoo_direct(sym, '3mo', '1d')
     except Exception:
         return None
+_MOOD_LOCK = threading.Lock()
 
 def market_mood(max_age=600) -> dict:
     c = _read(MOOD, {})
     if c.get('ts') and time.time() - c['ts'] < max_age:
         return c
+    with _MOOD_LOCK:
+        c = _read(MOOD, {})
+        if c.get('ts') and time.time() - c['ts'] < max_age:
+            return c
+        return _market_mood()
+
+def _market_mood() -> dict:
     info = {'ts': time.time(), 'when': _ny().strftime('%H:%M')}
     (bad, warn) = ([], [])
     for (sym, key) in (('SPY', 'spy'), ('QQQ', 'qqq')):
@@ -220,6 +234,14 @@ def allow(row: dict, mood: dict, cfg: dict) -> tuple[bool, str]:
         return (True, '')
     m = (mood or {}).get('mood', 'unknown')
     pl = row.get('_play') or {}
+    if cfg.get('macro_filter', True):
+        try:
+            import macro
+            ms = macro.status()
+            if ms['block']:
+                return (False, ms['why'])
+        except Exception:
+            pass
     if m == 'red' and cfg.get('mood_filter', True):
         return (False, 'market risk-off')
     if cfg.get('in_play_only', True):
@@ -229,6 +251,25 @@ def allow(row: dict, mood: dict, cfg: dict) -> tuple[bool, str]:
             strong = (pl.get('rvol') or 0) >= RVOL_STRONG or pl.get('earn') == 'news' or abs(pl.get('gap') or 0) >= 5
             if not strong:
                 return (False, 'shaky market, setup not strong enough')
+    if cfg.get('rs_filter', True) and pl.get('rs') is not None and (pl['rs'] < 0):
+        return (False, 'weaker than SPY today')
+    plan = row.get('_plan') or {}
+    try:
+        import meta
+        (e, t) = (float(plan['entry']), float(plan['target']))
+        if cfg.get('cost_filter', True) and (t - e) / e * 100 < 3 * 2 * meta.cost_pct(e):
+            return (False, 'target too small for trading costs')
+    except Exception:
+        pass
+    try:
+        import meta
+        (p, active, thr) = meta.score(meta.features(row, m))
+        if p is not None:
+            row['_conf'] = p
+            if active and cfg.get('meta_filter', True) and (thr is not None) and (p < thr):
+                return (False, 'low confidence score')
+    except Exception:
+        pass
     return (True, '')
 
 def summary_md() -> str:
@@ -239,7 +280,7 @@ def summary_md() -> str:
         lines.append(f"**Earnings:** {len(cal['today'])} companies report today, {len(cal['next'])} next trading day (stocks reporting tonight or tomorrow morning get a ⚠️ warning in alerts).")
     except Exception:
         pass
-    lines.append(f'**Stocks in Play rule:** a BUY alert needs volume ≥ {RVOL_IN_PLAY:g}x normal for the time of day, a gap ≥ {GAP_IN_PLAY:g}%, or fresh earnings news. On yellow days: volume ≥ {RVOL_STRONG:g}x, gap ≥ 5% or earnings.')
+    lines.append(f'**Stocks in Play rule:** a BUY alert needs volume ≥ {RVOL_IN_PLAY:g}x normal for the time of day, a gap ≥ {GAP_IN_PLAY:g}%, or fresh earnings news. On yellow days: volume ≥ {RVOL_STRONG:g}x, gap ≥ 5% or earnings. It must also be beating SPY today, and its target must be at least 3x the round-trip trading cost.')
     return '\n\n'.join(lines)
 EDGE_LOG = DATA / 'edge_log.json'
 

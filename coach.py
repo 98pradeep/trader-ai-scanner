@@ -20,8 +20,8 @@ def _read(path, default):
 def load():
     c = _read(COACH, {})
     c.setdefault('enabled', True)
-    c.setdefault('rules', {'min_stop': {}, 'late_cutoff': {}, 'cooldown': {}})
-    for k in ('min_stop', 'late_cutoff', 'cooldown'):
+    c.setdefault('rules', {'min_stop': {}, 'late_cutoff': {}, 'cooldown': {}, 'windows': {}})
+    for k in ('min_stop', 'late_cutoff', 'cooldown', 'windows'):
         c['rules'].setdefault(k, {})
     c.setdefault('history', [])
     c.setdefault('shadow', [])
@@ -176,6 +176,9 @@ def rules_list(c=None):
         out.append(f'On {tf} charts, skip setups whose stop is tighter than {v:g}% of the price.')
     for (tf, v) in r['late_cutoff'].items():
         out.append(f'On {tf} charts, no new entries after {v} (New York time).')
+    for (tf, names) in r.get('windows', {}).items():
+        for name in names:
+            out.append(f'On {tf} charts, no new entries between {WINDOWS[name][2]} (kept losing, confirmed walk-forward).')
     today = datetime.now().strftime('%Y-%m-%d')
     for (t, until) in r['cooldown'].items():
         if until >= today:
@@ -189,10 +192,19 @@ WF_TEST = 0.4
 
 def _sort_time(rs):
     return sorted(rs, key=lambda r: str(r.get('time', '')))
+WINDOWS = {'open': (570, 600, '9:30-10:00'), 'morning': (600, 690, '10:00-11:30'), 'lunch': (690, 810, '11:30-1:30'), 'afternoon': (810, 930, '1:30-3:30')}
+
+def _window_of(minute):
+    for (name, (a, b, _)) in WINDOWS.items():
+        if minute is not None and a <= minute < b:
+            return name
+    return None
 
 def _evidence(kind, tf, rows, c):
     if kind == 'min_stop':
         real = [r for r in rows if r.get('tf') == tf and (_stop_pct(r) or 99) < 1]
+    elif kind.startswith('win_'):
+        real = [r for r in rows if r.get('tf') == tf and _window_of(_minute(r)) == kind[4:]]
     else:
         real = [r for r in rows if r.get('tf') == tf and (_minute(r) or 0) >= 930]
     held = [x for x in c['shadow'] if x.get('status') not in (None, 'OPEN') and x.get('tf') == tf and (x.get('rule') == kind)]
@@ -220,6 +232,20 @@ def auto_adjust():
     rows = [r for r in journal() if r.get('status') in ('WIN', 'LOSS', 'EXPIRED')]
     made = []
     since_map = c['stats'].setdefault('rule_since', {})
+    for tf in ('1m', '5m', '15m'):
+        for (name, (_, _, label)) in WINDOWS.items():
+            kind = f'win_{name}'
+            if name in c['rules']['windows'].get(tf, []):
+                continue
+            (tr, te, al) = walk_forward(_evidence(kind, tf, rows, c))
+            if not _passes(tr, te, al):
+                continue
+            c['rules']['windows'].setdefault(tf, []).append(name)
+            since_map[f'{kind}:{tf}'] = _now()
+            why = f"{al['n'] - al['wins']} of {al['n']} {tf} signals between {label} lost ({al['total_R']:+.1f}R after costs). Walk-forward: older {tr['n']} won {tr['win_rate']:.0f}%, the {te['n']} newest it hadn't seen won {te['win_rate']:.0f}%."
+            text = f'New rule: on {tf} charts, no new entries between {label}.'
+            _change(c, text, why)
+            made.append(f'{text} Why: {why}')
     for tf in ('1m', '5m', '15m', '1h'):
         for (kind, label) in (('min_stop', 'a stop tighter than 1%'), ('late_cutoff', 'an entry after 3:30 pm')):
             if tf in c['rules'][kind]:
@@ -247,6 +273,18 @@ def auto_adjust():
             _change(c, f'Cool-down: no {t} buy alerts until {until}.', f"{t} lost {g['n']} times in the last 2 weeks.")
             made.append(f"{t} is on a 7-day cool-down after {g['n']} losses in a row.")
     c['rules']['cooldown'] = {t: u for (t, u) in c['rules']['cooldown'].items() if u >= today}
+    for (tf, names) in list(c['rules']['windows'].items()):
+        for name in list(names):
+            kind = f'win_{name}'
+            since = c['stats'].get('rule_since', {}).get(f'{kind}:{tf}', '')
+            held = [s for s in c['shadow'] if s.get('status') != 'OPEN' and s.get('tf') == tf and (s.get('rule') == kind) and (str(s.get('logged', '')) >= since)]
+            g = _agg(held)
+            if g['n'] >= 10 and g['win_rate'] > BREAKEVEN + 5 and (g['total_R'] > 0):
+                names.remove(name)
+                c['stats'].setdefault('rule_since', {}).pop(f'{kind}:{tf}', None)
+                why = f"the {g['n']} signals it held back would have won {g['win_rate']:.0f}% ({g['total_R']:+.1f}R)."
+                _change(c, f'Removed the {tf} {WINDOWS[name][2]} time rule.', why, 'remove')
+                made.append(f'Removed a {tf} time rule because {why}')
     for kind in ('min_stop', 'late_cutoff'):
         for tf in list(c['rules'][kind]):
             since = c['stats'].get('rule_since', {}).get(f'{kind}:{tf}', '')
@@ -264,7 +302,7 @@ def auto_adjust():
 
 def undo_all():
     c = load()
-    c['rules'] = {'min_stop': {}, 'late_cutoff': {}, 'cooldown': {}}
+    c['rules'] = {'min_stop': {}, 'late_cutoff': {}, 'cooldown': {}, 'windows': {}}
     _change(c, 'All coach rules removed by you.', 'you pressed Undo', 'remove')
     save(c)
 
@@ -311,6 +349,10 @@ def install():
             t = v['time']
             if not why and cut and hasattr(t, 'hour') and (f'{t.hour:02d}:{t.minute:02d}' >= cut):
                 (why, rule) = (f"it's after {cut}, and late {tf} entries have been losing", 'late_cutoff')
+            if not why and hasattr(t, 'hour'):
+                wname = _window_of(t.hour * 60 + t.minute)
+                if wname and wname in c['rules']['windows'].get(tf, []):
+                    (why, rule) = (f'{tf} entries between {WINDOWS[wname][2]} have kept losing', f'win_{wname}')
             if why:
                 v = dict(v)
                 v['coach_blocked'] = {'rule': rule, 'tf': tf, 'entry': float(v['plan']['entry']), 'stop': float(v['plan']['stop']), 'target': float(v['plan']['target']), 'time': str(t)}
@@ -369,10 +411,22 @@ def grade_shadow(periods):
         if out is None and len(after) >= MAX_BARS:
             out = ('EXPIRED', (float(after.close.iloc[-1]) - s['entry']) / risk)
         if out:
-            (s['status'], s['r']) = (out[0], round(float(out[1]), 3))
+            (s['status'], s['r_gross']) = (out[0], round(float(out[1]), 3))
+            s['r'] = round(float(out[1]) - _cost_r(s), 3)
+            changed = True
+    for s in c['shadow']:
+        if s.get('status') not in (None, 'OPEN') and 'r_gross' not in s and (s.get('r') is not None):
+            (s['r_gross'], s['r']) = (s['r'], round(float(s['r']) - _cost_r(s), 3))
             changed = True
     if changed:
         save(c)
+
+def _cost_r(s):
+    try:
+        import learner
+        return learner.cost_r(s)
+    except Exception:
+        return 0.0
 
 def self_develop(periods):
     done = []
@@ -388,6 +442,14 @@ def self_develop(periods):
         pass
     try:
         done += auto_adjust()
+    except Exception:
+        pass
+    try:
+        import meta
+        before = bool(meta._read(meta.MODEL, {}).get('active'))
+        info = meta.train(journal())
+        if bool(info.get('active')) != before:
+            done.append(('🧮 Confidence model switched ON: ' if info['active'] else '🧮 Confidence model switched off: ') + info['status'])
     except Exception:
         pass
     try:
@@ -427,8 +489,15 @@ def report_md(st=None):
                 (tr, te, al) = walk_forward(ev)
                 state = 'rule ON' if tf in c['rules'][kind] else 'no rule'
                 out.append(f"- {tf} {label}: learned on {tr['n']} ({tr['win_rate']:.0f}% wins), tested on {te['n']} newer ({te['win_rate']:.0f}% wins, {te['total_R']:+.1f}R) → {state}")
-        import edge
-        out += ['', edge.self_check_md(journal())]
+        for tf in ('1m', '5m', '15m'):
+            for (name, (_, _, label)) in WINDOWS.items():
+                ev = _evidence(f'win_{name}', tf, rows, c)
+                if len(ev) >= 6:
+                    (tr, te, al) = walk_forward(ev)
+                    state = 'rule ON' if name in c['rules']['windows'].get(tf, []) else 'no rule'
+                    out.append(f"- {tf} {label}: {al['n']} signals, {al['win_rate']:.0f}% wins, {al['total_R']:+.1f}R; newest {te['n']} won {te['win_rate']:.0f}% → {state}")
+        import edge, meta
+        out += ['', edge.self_check_md(journal()), '', meta.status_text()]
     except Exception:
         pass
     out.append('\n*R = profit in units of the risk taken. Fewer than 30 results is too few to trust, so treat these as hints.*')
