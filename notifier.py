@@ -128,6 +128,11 @@ def find_buys(cfg):
             extra += brain.load()['watchlist']
         except Exception:
             pass
+        try:
+            import study
+            extra += study.watchlist()
+        except Exception:
+            pass
         (rows, info) = market_scan.scan(cfg, on_verdict=remember, extra=extra)
         res = {'rows': rows, 'plans': {r['Ticker']: r['_plan'] for r in rows}, 'scanned': info.get('checked', 0), 'failed': [None] * info.get('no_data', 0), 'seconds': info.get('seconds'), 'market': info}
     else:
@@ -195,6 +200,22 @@ def find_buys(cfg):
         if pl.get('earn') == 'soon':
             body = '⚠️ ' + pl['earn_text'].capitalize() + ": big overnight gap risk, don't hold it past the close.\n" + body
         events.append({'key': f'BUY:{t}:{tf}:{now_ny:%Y-%m-%d}:{now_ny.hour // 2}', 'kind': 'BUY', 'ticker': t, 'tags': ['green_circle'], 'click': f'https://www.tradingview.com/chart/?symbol={t}', 'title': title, 'body': body, 'cmds': [{'label': 'I bought it', 'cmd': f"bought {plan['qty']:g} {t} at {plan['entry']:.4g} stop {plan['stop']:.4g} target {plan['target']:.4g}"}]})
+    try:
+        import bots
+        import study
+        wl = set(study.watchlist())
+        if wl:
+            today = datetime.now(NY).strftime('%Y-%m-%d')
+            for b in bots._rows()[-400:]:
+                if b.get('ticker') in wl and str(b.get('time', ''))[:10] == today:
+                    rec = ((study.cached(b['ticker']) or {}).get('bots') or {}).get(b['bot'], {}).get('all', {})
+                    track = f" On {b['ticker']} this bot has made {rec['avgR']:+.2f}R per trade over {rec['n']} trades (30 days)." if rec.get('n') else ''
+                    if rec.get('n', 0) >= 5 and rec.get('avgR', 0) < 0:
+                        track += ' ⚠️ It has been LOSING on this stock, so treat this one with extra caution.'
+                    events.append({'key': f"WATCH:{b['key']}", 'kind': 'WATCH', 'ticker': b['ticker'], 'tags': ['eyes'], 'click': f"https://www.tradingview.com/chart/?symbol={b['ticker']}", 'title': f"👀 {b['ticker']}: {bots.NAMES[b['bot']]} sees a setup", 'body': f"Entry ≈ {_money(b['entry'])}, stop {_money(b['stop'])}, target {_money(b['target'])} ({b['tf']} chart, {str(b['time'])[11:16]} candle).{track} One of your watched stocks: check the 🔬 Study tab before acting. An idea, not a guarantee."})
+            events += study.restudy_due(60)
+    except Exception:
+        pass
     if mac.get('events'):
         day = datetime.now(NY).strftime('%Y-%m-%d')
         events.append({'key': f'MACRO:{day}', 'kind': 'MACRO', 'ticker': '', 'tags': ['calendar'], 'title': '🗓️ Big economic news today: ' + ', '.join(mac['events']), 'body': (mac.get('note') or '') + ' New BUY alerts pause around the release; exit alerts keep working.'})
@@ -243,6 +264,23 @@ def read_commands(cfg, state):
             continue
         done.add(m['id'])
         last_t = max(last_t or 0, int(m.get('time', 0)))
+        wm = re.match('\\s*(watch|unwatch|study)\\s+(.+)$', m.get('message', ''), re.I)
+        if wm:
+            try:
+                import study
+                cur = study.watchlist()
+                names = [x for x in re.split('[\\s,]+', wm.group(2).upper()) if x]
+                if wm.group(1).lower() == 'unwatch':
+                    lst = study.set_watchlist([t for t in cur if t not in names])
+                elif wm.group(1).lower() == 'watch' and m.get('message', '').lower().startswith('watch list'):
+                    lst = cur
+                else:
+                    lst = study.set_watchlist(names if wm.group(1).lower() == 'watch' and len(names) > 1 else cur + names)
+                body = 'Studying and watching: ' + (', '.join(lst) or 'nothing') + ". I'll tell you about new patterns and setups."
+            except Exception as e:
+                body = f"Couldn't update the watch list: {e}"
+            replies.append({'key': f"CMD:{m['id']}", 'kind': 'REPLY', 'ticker': '', 'tags': ['speech_balloon'], 'title': 'Trader AI', 'body': body})
+            continue
         fm = re.match('\\s*filters?\\s+(\\w+)\\s+(on|off)\\s*$', m.get('message', ''), re.I)
         if fm:
             replies.append({'key': f"CMD:{m['id']}", 'kind': 'REPLY', 'ticker': '', 'tags': ['speech_balloon'], 'title': 'Trader AI', 'body': set_filter(fm.group(1), fm.group(2).lower() == 'on')})
