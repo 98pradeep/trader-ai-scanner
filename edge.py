@@ -301,7 +301,12 @@ def log_buys(rows, tf, mood):
 
 def self_check(journal_rows):
     lg = _read(EDGE_LOG, {})
-    graded = sorted([dict(r, **lg[r['key']]) for r in journal_rows if r.get('key') in lg and r.get('status') in ('WIN', 'LOSS', 'EXPIRED')], key=lambda r: str(r.get('time')))
+    try:
+        import meta
+        fs = meta._read(meta.FEATS, {})
+    except Exception:
+        fs = {}
+    graded = sorted([dict(r, **lg[r['key']], **{'_f': fs.get(r['key'], {})}) for r in journal_rows if r.get('key') in lg and r.get('status') in ('WIN', 'LOSS', 'EXPIRED')], key=lambda r: str(r.get('time')))
 
     def agg(rs):
         n = len(rs)
@@ -309,10 +314,12 @@ def self_check(journal_rows):
         R = sum((float(r.get('r') or 0) for r in rs))
         return {'n': n, 'win_rate': round(w / n * 100, 1) if n else 0.0, 'total_R': round(R, 2), 'avg_R': round(R / n, 2) if n else 0.0}
     out = {'graded': len(graded)}
-    for (name, test) in (('in_play', lambda r: r['in_play']), ('green_mood', lambda r: r['mood'] == 'green')):
-        (yes, no) = ([r for r in graded if test(r)], [r for r in graded if not test(r)])
-        half = len(graded) // 2
-        (old, new) = (graded[:half], graded[half:])
+    tests = (('in_play', lambda r: True, lambda r: r['in_play']), ('green_mood', lambda r: True, lambda r: r['mood'] == 'green'), ('not_red', lambda r: True, lambda r: r['mood'] != 'red'), ('beats_spy', lambda r: r['_f'].get('rs') is not None and 'rs' in r['_f'], lambda r: r['_f']['rs'] >= 0), ('cost_ok', lambda r: 'tgt_cost' in r['_f'], lambda r: r['_f']['tgt_cost'] >= 3))
+    for (name, has, test) in tests:
+        pool = [r for r in graded if has(r)]
+        (yes, no) = ([r for r in pool if test(r)], [r for r in pool if not test(r)])
+        half = len(pool) // 2
+        (old, new) = (pool[:half], pool[half:])
         out[name] = {'yes': agg(yes), 'no': agg(no), 'older': (agg([r for r in old if test(r)]), agg([r for r in old if not test(r)])), 'newer': (agg([r for r in new if test(r)]), agg([r for r in new if not test(r)]))}
         (y, n_) = (out[name]['yes'], out[name]['no'])
         enough = y['n'] >= 15 and n_['n'] >= 15
@@ -331,7 +338,7 @@ def self_check(journal_rows):
 def self_check_md(journal_rows):
     r = self_check(journal_rows)
     lines = [f"**Filter check** ({r['graded']} graded BUY signals with filter data)"]
-    for (name, label) in (('in_play', 'Stocks in Play'), ('green_mood', 'Green market mood')):
+    for (name, label) in (('in_play', 'Stocks in Play'), ('not_red', 'Pause on red market days'), ('beats_spy', 'Beating SPY'), ('cost_ok', 'Target ≥ 3x costs'), ('green_mood', 'Green market mood')):
         x = r[name]
         lines.append(f"- {label}: passed {x['yes']['n']} ({x['yes']['win_rate']:.0f}% wins, {x['yes']['avg_R']:+.2f}R avg) vs filtered out {x['no']['n']} ({x['no']['win_rate']:.0f}% wins, {x['no']['avg_R']:+.2f}R avg): {x['verdict']}.")
     return '\n'.join(lines)

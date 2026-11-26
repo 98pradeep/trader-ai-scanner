@@ -1,6 +1,7 @@
 import json
 import math
 import os
+import re
 import secrets
 import subprocess
 import sys
@@ -14,7 +15,7 @@ DATA.mkdir(exist_ok=True)
 (CFG, STATE) = (DATA / 'notify.json', DATA / 'notified.json')
 NY = ZoneInfo('America/New_York')
 NTFY = 'https://ntfy.sh'
-DEFAULT = {'enabled': False, 'mac': True, 'phone_topic': '', 'every_min': 15, 'timeframe': '15m', 'market_hours_only': True, 'tickers': '', 'max_position_pct': 50, 'fractional': False, 'scan_mode': 'market', 'checks_per_scan': 120, 'cloud': False, 'edge_filters': True, 'in_play_only': True, 'mood_filter': True, 'rs_filter': True, 'macro_filter': True, 'cost_filter': True, 'meta_filter': True}
+DEFAULT = {'enabled': False, 'mac': True, 'phone_topic': '', 'every_min': 15, 'timeframe': '15m', 'market_hours_only': True, 'tickers': '', 'max_position_pct': 50, 'fractional': False, 'scan_mode': 'market', 'checks_per_scan': 120, 'cloud': False, 'edge_filters': True, 'in_play_only': True, 'mood_filter': True, 'rs_filter': True, 'macro_filter': True, 'cost_filter': True, 'meta_filter': True, 'daily_report': True}
 _lock = threading.Lock()
 MAX_BUY_PUSH = 5
 _thread = None
@@ -181,6 +182,12 @@ def find_buys(cfg):
                     body = ins + '\n' + body
             except Exception:
                 pass
+        if r.get('_bot'):
+            try:
+                import bots
+                body = f"🤖 Idea from the {bots.NAMES[r['_bot']].split(' ', 1)[1]} (promoted: it beat the main bot on unseen data).\n" + body
+            except Exception:
+                pass
         if r.get('_conf') is not None:
             body = f"🧮 Confidence {r['_conf'] * 100:.0f}% (learned from past signals).\n" + body
         if mac.get('note'):
@@ -236,6 +243,10 @@ def read_commands(cfg, state):
             continue
         done.add(m['id'])
         last_t = max(last_t or 0, int(m.get('time', 0)))
+        fm = re.match('\\s*filters?\\s+(\\w+)\\s+(on|off)\\s*$', m.get('message', ''), re.I)
+        if fm:
+            replies.append({'key': f"CMD:{m['id']}", 'kind': 'REPLY', 'ticker': '', 'tags': ['speech_balloon'], 'title': 'Trader AI', 'body': set_filter(fm.group(1), fm.group(2).lower() == 'on')})
+            continue
         c = positions.parse_command(m.get('message', ''))
         try:
             reply = positions.run_command(c, 'phone') if c else 'I didn\'t understand: "' + m.get('message', '')[:80] + '". Try: bought 10 F at 11.20 · sold F · stop F 10.80 · list'
@@ -246,6 +257,23 @@ def read_commands(cfg, state):
     if last_t:
         state['cmd_since'] = str(last_t - 1)
     return replies
+FILTER_NAMES = {'in_play': 'in_play_only', 'inplay': 'in_play_only', 'mood': 'mood_filter', 'not_red': 'mood_filter', 'spy': 'rs_filter', 'beats_spy': 'rs_filter', 'rs': 'rs_filter', 'cost': 'cost_filter', 'cost_ok': 'cost_filter', 'macro': 'macro_filter', 'fed': 'macro_filter', 'confidence': 'meta_filter', 'meta': 'meta_filter'}
+
+def set_filter(name, on):
+    key = FILTER_NAMES.get(name.lower())
+    if not key:
+        return 'Filters you can switch: in_play, mood, spy, cost, macro, confidence. Example: filter in_play on'
+    cfg = load_cfg()
+    cfg[key] = bool(on)
+    save_cfg(cfg)
+    try:
+        import coach
+        c = coach.load()
+        c['stats'].setdefault('auto_filters', {})[key] = {'day': datetime.now().strftime('%Y-%m-%d'), 'to': bool(on), 'by': 'you'}
+        coach.save(c)
+    except Exception:
+        pass
+    return f"OK: the {name} filter is now {('ON' if on else 'OFF')}."
 
 def publish_command(text, cfg=None):
     import requests
@@ -299,6 +327,17 @@ def check_once(cfg=None, force=False, notify=True):
                 save_state(cs)
             except Exception:
                 pass
+        try:
+            nny = datetime.now(NY)
+            rs = load_state()
+            if notify and nny.weekday() < 5 and (nny.hour * 60 + nny.minute >= 960) and (rs.get('report_day') != nny.strftime('%Y-%m-%d')) and cfg.get('daily_report', True):
+                import stats
+                (title, body) = stats.daily_report(rs)
+                send(title, body, cfg, tags=['bar_chart'])
+                rs['report_day'] = nny.strftime('%Y-%m-%d')
+                save_state(rs)
+        except Exception:
+            pass
         if cfg['market_hours_only'] and (not force) and (not market_open()):
             return {'ok': True, 'note': 'US market is closed, so nothing was checked.', 'new': [], 'found': []}
         if not force:
@@ -324,6 +363,13 @@ def check_once(cfg=None, force=False, notify=True):
         except Exception as e:
             problems.append(f'scan: {type(e).__name__}: {str(e)[:100]}')
         state = load_state()
+        if info.get('held'):
+            day = datetime.now(NY).strftime('%Y-%m-%d')
+            hd = state.setdefault('held_day', {})
+            for k in [k for k in hd if k != day]:
+                del hd[k]
+            for (k, v) in info['held'].items():
+                hd.setdefault(day, {})[k] = hd.get(day, {}).get(k, 0) + v
         last_dev = state.get('last_develop', '')
         if last_dev < (datetime.now() - timedelta(minutes=60)).isoformat():
             try:

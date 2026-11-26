@@ -427,6 +427,40 @@ def _cost_r(s):
         return learner.cost_r(s)
     except Exception:
         return 0.0
+FILTER_KEYS = {'in_play': ('in_play_only', 'Stocks in Play filter'), 'not_red': ('mood_filter', 'market-mood pause'), 'beats_spy': ('rs_filter', 'beating-SPY filter'), 'cost_ok': ('cost_filter', 'target-vs-costs filter')}
+AUTO_MIN = 40
+
+def auto_tune_filters():
+    import edge
+    import notifier
+    chk = edge.self_check(journal())
+    cfg = notifier.load_cfg()
+    c = load()
+    auto = c['stats'].setdefault('auto_filters', {})
+    today = datetime.now().strftime('%Y-%m-%d')
+    made = []
+    for (name, (key, label)) in FILTER_KEYS.items():
+        x = chk.get(name) or {}
+        if x.get('yes', {}).get('n', 0) < AUTO_MIN or x.get('no', {}).get('n', 0) < AUTO_MIN:
+            continue
+        last = auto.get(key, {}).get('day', '')
+        if last and (datetime.fromisoformat(today) - datetime.fromisoformat(last)).days < 14:
+            continue
+        on = bool(cfg.get(key, True))
+        v = x.get('verdict', '')
+        (y, n) = (x['yes'], x['no'])
+        if on and v.startswith('NOT helping'):
+            cfg[key] = False
+            auto[key] = {'day': today, 'to': False}
+            made.append(f"🔧 Switched OFF the {label}: the {n['n']} signals it would block made {n['avg_R']:+.2f}R each vs {y['avg_R']:+.2f}R for the {y['n']} it let through, in both older and newer data. Undo: send 'filter {name} on' on your command channel, or tick it in the Alerts panel.")
+        elif not on and auto.get(key, {}).get('to') is False and v.startswith('helping'):
+            cfg[key] = True
+            auto[key] = {'day': today, 'to': True}
+            made.append(f"🔧 Switched the {label} back ON: it is helping again ({y['avg_R']:+.2f}R vs {n['avg_R']:+.2f}R).")
+    if made:
+        notifier.save_cfg(cfg)
+        save(c)
+    return made
 
 def self_develop(periods):
     done = []
@@ -450,6 +484,16 @@ def self_develop(periods):
         info = meta.train(journal())
         if bool(info.get('active')) != before:
             done.append(('🧮 Confidence model switched ON: ' if info['active'] else '🧮 Confidence model switched off: ') + info['status'])
+    except Exception:
+        pass
+    try:
+        import bots
+        bots.grade(periods)
+        done += bots.review()
+    except Exception:
+        pass
+    try:
+        done += auto_tune_filters()
     except Exception:
         pass
     try:

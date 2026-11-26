@@ -48,6 +48,18 @@ def _check_one(t, px, tf, period, p, b, account, risk_pct, max_pos_pct, fraction
                 on_verdict(t, v)
             except Exception:
                 pass
+        bot_used = None
+        try:
+            import bots
+            found = bots.run(t, tf, d)
+            prom = sorted(bots.promoted() & set(found))
+            if v['action'] != 'BUY' and prom and (not v.get('coach_blocked')):
+                bot_used = prom[0]
+                bp = found[bot_used]
+                rr = (bp['target'] - bp['entry']) / (bp['entry'] - bp['stop'])
+                v = dict(v, action='BUY', headline=f'{bots.NAMES[bot_used]} spotted a setup', plan=dict(v.get('plan') or {}, **bp, stop_pct=(bp['entry'] - bp['stop']) / bp['entry'] * 100, rr=rr))
+        except Exception:
+            pass
         plan = v['plan']
         if not plan:
             return ('skip',)
@@ -64,6 +76,8 @@ def _check_one(t, px, tf, period, p, b, account, risk_pct, max_pos_pct, fraction
         row = {'Ticker': t, 'Signal': v['action'], 'Price': round(float(v['last'].close), 2), 'Shares': sz['qty'], 'Cost $': round(sz['cost'], 2), 'Max loss $': round(sz['max_loss'], 2), 'Target gain $': round(sz['gain'], 2), 'Rules met': f'{ok}/{total}', 'Size limited by': sz['limit'], 'Risk check': passed, '_ok': ok, 'Why': v['headline']}
         lst = v['last']
         row['_time'] = str(v['time'])
+        if bot_used:
+            row['_bot'] = bot_used
         try:
             import edge
             pl = edge.in_play(t, df)
@@ -103,7 +117,27 @@ def scan_affordable(tickers, tf, period, p, budget, account, risk_pct, max_pos_p
     rows.sort(key=lambda r: (r['Signal'] != 'BUY', -r['_ok'], r['Max loss $']))
     return dict(rows=rows, plans=plans, too_pricey=too_pricey, failed=failed, account=account, tf=tf, scanned=len(tickers), cheapest=min(pricey_px) if pricey_px else None, cash_cap=cash_cap, seconds=round(_time.time() - started, 1))
 
+def _rerun_fragment():
+    try:
+        st.rerun(scope='fragment')
+    except (TypeError, st.errors.StreamlitAPIException):
+        st.rerun()
+
 def render_picks_tab(budget, tf, period, p):
+    if hasattr(st, 'fragment'):
+        st.fragment(_picks_tab)(budget, tf, period, p)
+    else:
+        _picks_tab(budget, tf, period, p)
+
+def _picks_tab(budget, tf, period, p):
+    ss = st.session_state
+    ss['_picks_go'] = False
+    _picks_body(budget, tf, period, p)
+    if ss.get('_picks_go') and ss.get('picks_auto') and ss.get('_picks_mode_whole', True):
+        ss['_picks_go'] = False
+        _rerun_fragment()
+
+def _picks_body(budget, tf, period, p):
     st.subheader('Stocks that fit the money you have')
     st.caption("Scans a list of stocks with the same rules as the Signal tab, then sizes each trade to YOUR account. 'Affordable' does not mean 'good': a BUY is still only a shortlist item to research.")
     (c1, c2, c3) = st.columns(3)
@@ -122,44 +156,66 @@ def render_picks_tab(budget, tf, period, p):
     modes = ['🌎 The whole US market', '📝 My own list']
     mode = st.radio('What to scan', modes, horizontal=True, key='picks_mode')
     ss = st.session_state
+    ss['_picks_mode_whole'] = mode == modes[0]
     if mode == modes[0]:
         batch = st.select_slider('Charts to read per click (most active first)', [50, 100, 150, 200, 300], 150, key='picks_batch', help="Every US stock is screened instantly for price, volume and today's move. The ones you can trade are then chart-checked, most active first. Use 'Check the next ...' to keep going through the rest. Bigger batches take longer, and Yahoo may slow you down above ~300.")
+        auto = st.toggle('🔁 Keep going on its own (checks the next batch automatically until every stock is done)', key='picks_auto', help='After each batch the next one starts by itself. Results from every batch stay in the table. Turn this off, or press any button, to pause. It also pauses by itself if Yahoo starts refusing data.')
         (c_a, c_b) = st.columns(2)
         start_new = c_a.button('💰 Find stocks I can trade (whole market)', type='primary')
-        nxt = c_b.button(f'➡️ Check the next {batch}', disabled=not ss.get('_picks_trad'))
-        if start_new or nxt:
+        nxt = c_b.button(f'➡️ Check the next {batch}')
+        running = ss.get('_picks_running', False)
+        if start_new or nxt or (auto and running):
             import market_scan
-            if start_new or not ss.get('_picks_trad'):
+            fresh = start_new or not ss.get('_picks_trad')
+            if fresh:
                 with st.spinner('Getting every US stock from Nasdaq...'):
                     (rows, source, err) = market_scan.universe(max_age_sec=120)
                 trad = market_scan.tradable(rows, account, max_pos, frac)
                 (ss['_picks_trad'], ss['_picks_info'], ss['_picks_off']) = (trad, (len(rows), source, err), 0)
+                ss.pop('_picks', None)
+                ss['_picks_note'] = None
+            ss['_picks_running'] = True
             (trad, off) = (ss['_picks_trad'], ss.get('_picks_off', 0))
             names = [r['s'] for r in trad[off:off + batch]]
-            ss['_picks_off'] = off + len(names)
             (total, source, err) = ss['_picks_info']
             st.caption(f'{total:,} US stocks screened ({source}) → {len(trad):,} you can trade with these settings → chart-checking #{off + 1}-{off + len(names)} (most active first).')
             if err:
                 st.caption(f'(Nasdaq list problem: {err}. Used {source}.)')
             if names:
                 bar = st.progress(0.0, text='Starting...')
-                res = scan_affordable(names, tf, period, p, budget, account, risk_pct, max_pos, frac, earn, progress=lambda f, t: bar.progress(f, text=f'Checking {t}...'))
+                res = scan_affordable(names, tf, period, p, budget, account, risk_pct, max_pos, frac, earn, progress=lambda f, t: bar.progress(f, text=f'Checking {t}... (#{off + 1}-{off + len(names)} of {len(trad):,})'))
                 bar.empty()
+                ss['_picks_off'] = off + len(names)
                 q = {r['s']: r for r in trad}
                 for r in res['rows']:
                     r['Today %'] = round(q.get(r['Ticker'], {}).get('c') or 0, 1)
-                old = ss.get('_picks') if nxt and ss.get('_picks') else None
+                old = None if fresh else ss.get('_picks')
                 if old:
                     res['rows'] = sorted(old['rows'] + res['rows'], key=lambda r: (r['Signal'] != 'BUY', -r['_ok'], r['Max loss $']))
                     res['plans'] = {**old['plans'], **res['plans']}
                     res['too_pricey'] = old['too_pricey'] + res['too_pricey']
                     res['failed'] = old['failed'] + res['failed']
                     res['scanned'] = old['scanned'] + res['scanned']
+                    res['seconds'] = round(old.get('seconds', 0) + res['seconds'], 1)
                 ss['_picks'] = res
+                blocked = len(names) >= 10 and len(res['failed']) - (len(old['failed']) if old else 0) >= len(names) * 0.5
+                if blocked:
+                    ss['_picks_running'] = False
+                    ss['_picks_note'] = f"Paused: Yahoo stopped sending data for most of the last batch. Wait a few minutes, then press 'Check the next {batch}' to carry on from #{ss['_picks_off'] + 1}."
+                elif ss['_picks_off'] >= len(trad):
+                    ss['_picks_running'] = False
+                    ss['_picks_note'] = f"Done: all {len(trad):,} tradable stocks were checked. Press 'Find stocks I can trade' for a fresh round."
+                else:
+                    ss['_picks_note'] = None
+                    ss['_picks_go'] = bool(auto)
             else:
+                ss['_picks_running'] = False
                 st.info("You've checked every stock that fits your settings. Press 'Find stocks I can trade' to start fresh.")
         if ss.get('_picks_trad'):
-            st.caption(f"Checked {ss.get('_picks_off', 0):,} of {len(ss['_picks_trad']):,} tradable stocks so far.")
+            (done, tot) = (ss.get('_picks_off', 0), len(ss['_picks_trad']))
+            st.progress(min(1.0, done / max(1, tot)), text=f'Checked {done:,} of {tot:,} tradable stocks so far' + (' - next batch starting automatically...' if auto and ss.get('_picks_running') and (done < tot) else '.'))
+        if ss.get('_picks_note'):
+            (st.warning if ss['_picks_note'].startswith('Paused') else st.success)(ss['_picks_note'])
     else:
         if 'picks_uni' not in ss:
             ss['picks_uni'] = DEFAULT_UNIVERSE
