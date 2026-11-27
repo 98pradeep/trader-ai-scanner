@@ -11,7 +11,10 @@ DATA.mkdir(exist_ok=True)
 WATCH = DATA / 'watch.json'
 CACHE = DATA / 'watch_study.json'
 MAX_BARS = 60
-BOT_NAMES = {'main': '📏 Main rules bot', 'orb': '🌅 Opening-range bot', 'vwap': '〰️ VWAP-bounce bot', 'hod': '🚀 High-of-day bot', 'meanrev': '🪃 Snap-back bot'}
+try:
+    from bots import NAMES as BOT_NAMES
+except Exception:
+    BOT_NAMES = {'main': '📏 Main rules bot', 'orb': '🌅 Opening-range bot', 'vwap': '〰️ VWAP-bounce bot', 'hod': '🚀 High-of-day bot', 'meanrev': '🪃 Snap-back bot'}
 POS = ('beat', 'beats', 'upgrade', 'upgraded', 'raises', 'raised', 'record', 'approval', 'approved', 'surge', 'soar', 'jumps', 'rally', 'buyback', 'partnership', 'wins', 'contract', 'strong', 'outperform', 'bullish', 'growth', 'profit', 'tops', 'higher')
 NEG = ('miss', 'misses', 'downgrade', 'downgraded', 'cuts', 'cut', 'lawsuit', 'sued', 'probe', 'investigation', 'recall', 'plunge', 'falls', 'drops', 'slump', 'offering', 'dilution', 'bankruptcy', 'layoffs', 'weak', 'warning', 'warns', 'bearish', 'loss', 'fraud', 'delay', 'lower', 'sell-off', 'selloff')
 
@@ -158,13 +161,14 @@ def habits(df5):
 def _grade(d, i, plan):
     (h, l, c) = (d['high'].to_numpy(float), d['low'].to_numpy(float), d['close'].to_numpy(float))
     risk = plan['entry'] - plan['stop']
-    for j in range(i + 1, min(len(d), i + 1 + MAX_BARS)):
+    nb = int(plan.get('bars') or MAX_BARS)
+    for j in range(i + 1, min(len(d), i + 1 + nb)):
         if l[j] <= plan['stop']:
             return -1.0
         if h[j] >= plan['target']:
             return (plan['target'] - plan['entry']) / risk
-    if len(d) - i - 1 >= MAX_BARS:
-        return (c[min(len(d) - 1, i + MAX_BARS)] - plan['entry']) / risk
+    if len(d) - i - 1 >= nb:
+        return (c[min(len(d) - 1, i + nb)] - plan['entry']) / risk
     return None
 
 def replay(d, tf='5m'):
@@ -176,6 +180,8 @@ def replay(d, tf='5m'):
         cost = lambda e, s: 0.0
     res = {b: [] for b in BOT_NAMES}
     seen = set()
+    d = d.copy()
+    d.attrs = {}
     stop_mult = 1.5
     rr = 2.0
     sig = d['long_sig'].to_numpy(bool) if 'long_sig' in d else None
@@ -191,7 +197,7 @@ def replay(d, tf='5m'):
             if r is not None:
                 res['main'].append({'time': str(idx[i]), 'r': round(r - cost(p['entry'], p['stop']), 3)})
         try:
-            found = bots.ideas(d.iloc[max(0, i - 259):i + 1], tf)
+            found = bots.ideas(d.iloc[max(0, i - 1199):i + 1], tf)
         except Exception:
             found = {}
         for (b, p) in found.items():
@@ -231,6 +237,30 @@ def study(ticker, use_news=True):
     except Exception:
         (df5, d5) = (None, None)
     rep['habits'] = habits(df5)
+    old = cached(t) or {}
+    if old.get('swing') and time.time() - old.get('swing_ts', 0) < 86400:
+        (rep['swing'], rep['swing_ts']) = (old['swing'], old['swing_ts'])
+        try:
+            import swing
+            rep['swing_now'] = [s_ for (s_, _) in swing.signals_now(swing.prep(dfd))] if len(dfd) >= 210 else old.get('swing_now', [])
+        except Exception:
+            rep['swing_now'] = old.get('swing_now', [])
+    else:
+        try:
+            import swing
+            dl = E.load_prices(t, '10y', '1d')
+            if dl is not None and len(dl) > 300:
+                dp = swing.prep(dl)
+                bt = swing.backtest(dp)
+                sw = {}
+                for (k, tr) in bt.items():
+                    half = len(tr) // 2
+                    sw[k] = {'all': swing.summarize(tr), 'older': swing.summarize(tr[:half]), 'newer': swing.summarize(tr[half:]), 'years': round(len(dl) / 252, 1)}
+                rep['swing'] = sw
+                rep['swing_ts'] = time.time()
+                rep['swing_now'] = [s_ for (s_, _) in swing.signals_now(dp)]
+        except Exception:
+            pass
     if d5 is not None and len(d5) > 300:
         rr = replay(d5)
         table = {}
@@ -294,10 +324,28 @@ def strategy(rep):
             lines.append(f"**Plan (high-of-day break):** after 10:00, buy a 5-minute close above the day's high (now {now.get('today_high', 0):.2f}) on at least 2x normal volume, only if the stock is up on the day and above VWAP. Stop: below the last 3 candles' low. Target: 2x risk.")
         elif best == 'meanrev':
             lines.append(f"**Plan (snap-back):** wait for a sharp drop: RSI under 25 and price below the lower Bollinger band, while the stock is still in its longer uptrend. Buy the close, stop 1.5 ATR (≈ {1.5 * atr5:.2f}) below, target VWAP (≈ {now.get('vwap', 0):.2f}). Small size: these catch falling knives.")
+        elif best == 'noise':
+            lines.append("**Plan (out-of-the-noise):** on the half hour (10:00, 10:30 ... 3:30), buy if price is above both VWAP and this stock's usual move from the open for that time of day (it breaks out of its normal noise). Stop: just under VWAP / the noise line. Target 2x risk, and sell by the 4:00 close at the latest.")
+        elif best == 'lasthalf':
+            lines.append("**Plan (last half hour):** if the stock is up 0.5%+ from yesterday's close by 10:00 and at 3:30 it is still above that 10:00 price and above VWAP, buy at 3:30 and sell at the 4:00 close. Stop 1 ATR below.")
         else:
             lines.append("**Plan (main rules):** take the main bot's BUY signals on this stock (they appear in the Signal tab and on your phone). Use its stop and target; it has worked here.")
     else:
-        lines.append("**No reliable edge found yet.** None of the bots made money on this stock over the last 30 days (after costs), so the honest plan is to **watch only**. I'll keep studying it and tell you if that changes.")
+        lines.append("**No reliable day-trading edge yet.** None of the day-trading bots made money on this stock over the last 30 days (after costs), so for day trades the honest plan is to **watch only**. I'll keep studying it and tell you if that changes.")
+    sw = rep.get('swing') or {}
+    sc = [(k, x) for (k, x) in sw.items() if x['all']['n'] >= 10 and x['all']['avg'] > 0.3 and ((x['all']['pf'] or 0) >= 1.3) and (x['newer']['avg'] > 0)]
+    sc.sort(key=lambda kx: kx[1]['all']['avg'] * math.sqrt(kx[1]['all']['n']), reverse=True)
+    best_swing = sc[0][0] if sc else None
+    try:
+        import swing as SW
+        if sc:
+            (k, x) = sc[0]
+            a = x['all']
+            lines.append(f"**Best multi-day strategy: {SW.NAMES[k]}**: {a['n']} trades over {x['years']} years on this stock, {a['win']:.0f}% wins, {a['avg']:+.2f}% per trade after costs (newer half {x['newer']['avg']:+.2f}%), held {a['days']:.0f} days on average. Rules: {SW.PLAIN[k]}" + (' **It is signalling right now.**' if k in (rep.get('swing_now') or []) else ''))
+        elif sw:
+            lines.append('**Multi-day:** none of the 5 swing strategies had a solid record on this stock over 10 years.')
+    except Exception:
+        pass
     swing = []
     names = {p['name'] for p in rep.get('patterns', [])}
     if '🔁 Double bottom' in names and lv.get('db_neck'):
@@ -325,7 +373,7 @@ def strategy(rep):
     if cautions:
         lines.append('**Be careful:** ' + '; '.join(cautions) + '.')
     lines.append('*Based on the last 30 days of this stock only: a small sample. Treat it as a hypothesis the bot keeps testing, not a promise.*')
-    return {'best': best, 'text': '\n\n'.join(lines), 'bias': bias}
+    return {'best': best, 'best_swing': best_swing, 'text': '\n\n'.join(lines), 'bias': bias}
 
 def report_md(rep):
     if rep.get('error'):
@@ -349,6 +397,16 @@ def report_md(rep):
         for (b, x) in rep['bots'].items():
             a = x['all']
             out.append(f"| {BOT_NAMES[b]} | {a['n']} | {a['win']:.0f}% | {a['avgR']:+.2f} | {a['totR']:+.1f} | {x['older']['avgR']:+.2f} | {x['newer']['avgR']:+.2f} |")
+    if rep.get('swing'):
+        try:
+            import swing as SW
+            yrs = next(iter(rep['swing'].values())).get('years', '?')
+            out += [f'\n**Multi-day strategies on this stock ({yrs} years of daily candles, after costs)**', '| Strategy | Trades | Win % | Avg % per trade | Profit factor | Older half | Newer half | Days held |', '|---|---|---|---|---|---|---|---|']
+            for (k, x) in rep['swing'].items():
+                a = x['all']
+                out.append(f"| {SW.NAMES[k]}{(' 🔔' if k in (rep.get('swing_now') or []) else '')} | {a['n']} | {a['win']:.0f}% | {a['avg']:+.2f}% | {(a['pf'] if a['pf'] is not None else '-')} | {x['older']['avg']:+.2f}% | {x['newer']['avg']:+.2f}% | {a['days']} |")
+        except Exception:
+            pass
     nw = rep.get('news') or {}
     if nw.get('items'):
         out.append(f"\n**News tone: {nw['tone']}**")

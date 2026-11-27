@@ -9,7 +9,8 @@ DATA = Path(os.getenv('TRADER_DATA_DIR', 'trader_data'))
 DATA.mkdir(exist_ok=True)
 LOG = DATA / 'bots.jsonl'
 STATE = DATA / 'bots_state.json'
-NAMES = {'main': '📏 Main rules bot', 'orb': '🌅 Opening-range bot', 'vwap': '〰️ VWAP-bounce bot', 'hod': '🚀 High-of-day bot', 'meanrev': '🪃 Snap-back bot'}
+NAMES = {'main': '📏 Main rules bot', 'orb': '🌅 Opening-range bot', 'vwap': '〰️ VWAP-bounce bot', 'hod': '🚀 High-of-day bot', 'meanrev': '🪃 Snap-back bot', 'noise': '📡 Out-of-the-noise bot', 'lasthalf': '⏰ Last-half-hour bot'}
+BOTS = ('orb', 'vwap', 'hod', 'meanrev', 'noise', 'lasthalf')
 MAX_BARS = 60
 MIN_GRADED = 40
 
@@ -42,12 +43,15 @@ def _ny(d):
     idx = d.index
     return idx.tz_convert('America/New_York') if getattr(idx, 'tz', None) is not None else idx
 
-def _plan(entry, stop, target):
+def _plan(entry, stop, target, bars=None, min_stop=0.3):
     if not (entry > 0 and stop > 0 and (entry > stop) and (target > entry)):
         return None
-    if (entry - stop) / entry * 100 < 0.3:
+    if (entry - stop) / entry * 100 < min_stop:
         return None
-    return {'entry': round(entry, 4), 'stop': round(stop, 4), 'target': round(target, 4)}
+    p = {'entry': round(entry, 4), 'stop': round(stop, 4), 'target': round(target, 4)}
+    if bars:
+        p['bars'] = int(bars)
+    return p
 
 def ideas(d, tf):
     out = {}
@@ -56,7 +60,8 @@ def ideas(d, tf):
     idx = _ny(d)
     day = idx[-1].date()
     mins = idx[-1].hour * 60 + idx[-1].minute
-    today = d[[x.date() == day for x in idx]]
+    norm = idx.normalize()
+    today = d[norm == norm[-1]]
     if len(today) < 2:
         return out
     (L, P) = (d.iloc[-1], d.iloc[-2])
@@ -82,7 +87,7 @@ def ideas(d, tf):
             if p:
                 out['vwap'] = p
     if 600 <= mins <= 900 and len(today) >= 4 and (close > float(today.high.iloc[:-1].max())) and (close > vwap) and (relvol >= 2):
-        prev_days = d[[x.date() < day for x in idx]]
+        prev_days = d[norm < norm[-1]]
         if len(prev_days) and close > float(prev_days.close.iloc[-1]):
             stop = float(d.low.iloc[-3:].min()) - 0.1 * atr
             if close - stop <= 3 * atr:
@@ -100,7 +105,55 @@ def ideas(d, tf):
                 p = _plan(close, stop, target)
                 if p:
                     out['meanrev'] = p
+    step = int(round((idx[-1] - idx[-2]).total_seconds() / 60)) if len(idx) > 1 else 5
+    step = step if step in (5, 15) else 5
+    left = max(1, (960 - (mins + step)) // step)
+    prev = d[norm < norm[-1]]
+    pclose = float(prev.close.iloc[-1]) if len(prev) else float('nan')
+    end = mins + step
+    if 600 <= end <= 930 and end % 30 == 0 and len(prev):
+        sig = _noise_sigma(d, idx, norm, end)
+        o = float(today.open.iloc[0])
+        if sig and sig > 0 and (o > 0):
+            ub = max(o, pclose) * (1 + sig)
+            if close > ub and close > vwap and (float(today.close.iloc[:-1].max() if len(today) > 1 else 0) <= ub * 1.003):
+                stop = max(vwap, ub) - 0.25 * atr
+                if close - stop <= 2.5 * atr:
+                    p = _plan(close, stop, close + 2 * (close - stop), bars=left, min_stop=0.2)
+                    if p:
+                        out['noise'] = p
+    if end == 930 and pclose > 0:
+        at10 = today[[t.hour * 60 + t.minute + step == 600 for t in idx[norm == norm[-1]]]]
+        if len(at10):
+            first = (float(at10.close.iloc[0]) / pclose - 1) * 100
+            if first >= 0.5 and close > vwap and (close > float(at10.close.iloc[0])):
+                p = _plan(close, close - 1.0 * atr, close + 3.0 * atr, bars=left, min_stop=0.1)
+                if p:
+                    out['lasthalf'] = p
     return out
+_SIG_CACHE = {}
+
+def _noise_sigma(d, idx, norm, end):
+    key = (str(d.index[0]), float(d.close.iloc[0]), str(norm[-1]), end)
+    if key in _SIG_CACHE:
+        return _SIG_CACHE[key]
+    days = sorted(set(norm[norm < norm[-1]]))[-14:]
+    moves = []
+    mod = idx.hour * 60 + idx.minute
+    step = int(round((idx[-1] - idx[-2]).total_seconds() / 60)) if len(idx) > 1 else 5
+    for dd in days:
+        m = norm == dd
+        if not m.any():
+            continue
+        o = float(d.open[m].iloc[0])
+        sel = m & (mod + step == end)
+        if o > 0 and sel.any():
+            moves.append(abs(float(d.close[sel].iloc[0]) / o - 1))
+    val = sum(moves) / len(moves) if len(moves) >= 3 else None
+    if len(_SIG_CACHE) > 5000:
+        _SIG_CACHE.clear()
+    _SIG_CACHE[key] = val
+    return val
 
 def run(ticker, tf, d):
     try:
@@ -152,7 +205,8 @@ def grade(periods, max_tickers=40):
         ts = pd.Timestamp(r['time'])
         if df.index.tz is not None and ts.tzinfo is None:
             ts = ts.tz_localize(df.index.tz)
-        after = df[df.index > ts].iloc[:MAX_BARS]
+        nb = int(r.get('bars') or MAX_BARS)
+        after = df[df.index > ts].iloc[:nb]
         risk = r['entry'] - r['stop']
         if risk <= 0 or after.empty:
             continue
@@ -164,7 +218,7 @@ def grade(periods, max_tickers=40):
             if c.high >= r['target']:
                 out = ('WIN', (r['target'] - r['entry']) / risk)
                 break
-        if out is None and len(after) >= MAX_BARS:
+        if out is None and len(after) >= nb:
             out = ('EXPIRED', (float(after.close.iloc[-1]) - r['entry']) / risk)
         if out:
             (r['status'], r['r_gross']) = (out[0], round(float(out[1]), 3))
@@ -188,7 +242,7 @@ def stats(rs):
 
 def leaderboard(journal_rows=None):
     rows = _rows()
-    groups = {b: _graded([r for r in rows if r.get('bot') == b]) for b in ('orb', 'vwap', 'hod', 'meanrev')}
+    groups = {b: _graded([r for r in rows if r.get('bot') == b]) for b in BOTS}
     if journal_rows is None:
         try:
             import coach
@@ -211,8 +265,18 @@ def review():
     main_test = board['main']['test']['avgR']
     rows = _rows()
     made = []
-    for b in ('orb', 'vwap', 'hod', 'meanrev'):
+    hist = _hist_bots()
+    hm = (hist.get('main') or {}).get('newer', {}).get('avgR', 0.0)
+    for b in BOTS:
         x = board[b]
+        h = hist.get(b) or {}
+        if b not in prom and x['all']['n'] < MIN_GRADED and h:
+            (a, o, nw) = (h.get('all', {}), h.get('older', {}), h.get('newer', {}))
+            if a.get('n', 0) >= 150 and o.get('avgR', -1) > 0.05 and (nw.get('avgR', -1) >= 0.15) and (nw.get('avgR', 0) > hm) and ((a.get('pf') or 0) >= 1.2):
+                prom[b] = _now()
+                st.setdefault('how', {})[b] = 'history'
+                made.append(f"{NAMES[b]} PROMOTED from history training: replayed on {a['n']} past setups across many stocks, it made {o['avgR']:+.2f}R per trade on the older half and {nw['avgR']:+.2f}R on the newer half (after costs), better than the main bot's {hm:+.2f}R. Its live ideas now reach your phone; it is demoted if its live ideas start losing.")
+                continue
         if b not in prom:
             if x['all']['n'] >= MIN_GRADED and x['train']['avgR'] > 0 and (x['test']['avgR'] >= 0.15) and (x['test']['avgR'] > main_test) and (x['test']['n'] >= 15):
                 prom[b] = _now()
@@ -222,10 +286,18 @@ def review():
             s = stats(since)
             if s['n'] >= 25 and s['avgR'] < 0:
                 del prom[b]
+                st.get('how', {}).pop(b, None)
                 made.append(f"{NAMES[b]} demoted: since promotion its {s['n']} ideas lost {s['avgR']:+.2f}R each.")
     st['reviewed'] = _now()
     STATE.write_text(json.dumps(st))
     return made
+
+def _hist_bots():
+    try:
+        import history
+        return history.bot_summary()
+    except Exception:
+        return {}
 
 def promoted():
     return set(_read(STATE, {}).get('promoted', {}))
@@ -234,7 +306,8 @@ def report_md():
     lines = ['### 🤖 Bot leaderboard (after trading costs)', '| Bot | Ideas graded | Win % | Avg R | Total R | Profit factor | Newest 40% avg R | Status |', '|---|---|---|---|---|---|---|---|']
     for x in leaderboard():
         (a, t) = (x['all'], x['test'])
-        status = '⭐ promoted' if x['promoted'] else 'main' if x['bot'] == 'main' else 'learning' if a['n'] < MIN_GRADED else 'watching'
+        how = _read(STATE, {}).get('how', {}).get(x['bot'])
+        status = '⭐ promoted' + (' (history)' if how == 'history' else '') if x['promoted'] else 'main' if x['bot'] == 'main' else 'learning' if a['n'] < MIN_GRADED else 'watching'
         lines.append(f"| {x['name']} | {a['n']} (+{x['open']} open) | {a['win']:.0f}% | {a['avgR']:+.2f} | {a['totR']:+.1f} | {(a['pf'] if a['pf'] is not None else '-')} | {t['avgR']:+.2f} | {status} |")
     lines.append(f'\n*A bot is promoted after {MIN_GRADED}+ graded ideas if, on its newest 40% (the walk-forward test), it beats the main bot and makes at least +0.15R per idea. Profit factor = money won ÷ money lost (above 1 = profitable).*')
     return '\n'.join(lines)

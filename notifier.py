@@ -15,7 +15,7 @@ DATA.mkdir(exist_ok=True)
 (CFG, STATE) = (DATA / 'notify.json', DATA / 'notified.json')
 NY = ZoneInfo('America/New_York')
 NTFY = 'https://ntfy.sh'
-DEFAULT = {'enabled': False, 'mac': True, 'phone_topic': '', 'every_min': 15, 'timeframe': '15m', 'market_hours_only': True, 'tickers': '', 'max_position_pct': 50, 'fractional': False, 'scan_mode': 'market', 'checks_per_scan': 120, 'cloud': False, 'edge_filters': True, 'in_play_only': True, 'mood_filter': True, 'rs_filter': True, 'macro_filter': True, 'cost_filter': True, 'meta_filter': True, 'daily_report': True}
+DEFAULT = {'enabled': False, 'mac': True, 'phone_topic': '', 'every_min': 15, 'timeframe': '15m', 'market_hours_only': True, 'tickers': '', 'max_position_pct': 50, 'fractional': False, 'scan_mode': 'market', 'checks_per_scan': 120, 'cloud': False, 'edge_filters': True, 'in_play_only': True, 'mood_filter': True, 'rs_filter': True, 'macro_filter': True, 'cost_filter': True, 'meta_filter': True, 'daily_report': True, 'swing_alerts': True}
 _lock = threading.Lock()
 MAX_BUY_PUSH = 5
 _thread = None
@@ -281,6 +281,20 @@ def read_commands(cfg, state):
                 body = f"Couldn't update the watch list: {e}"
             replies.append({'key': f"CMD:{m['id']}", 'kind': 'REPLY', 'ticker': '', 'tags': ['speech_balloon'], 'title': 'Trader AI', 'body': body})
             continue
+        msg = m.get('message', '').strip().lower()
+        if msg in ('train', 'learn', 'train now'):
+            state['train_now'] = True
+            replies.append({'key': f"CMD:{m['id']}", 'kind': 'REPLY', 'ticker': '', 'tags': ['speech_balloon'], 'title': 'Trader AI', 'body': "OK: I'll train on the past market " + ('now (takes up to 15 min).' if not market_open() else 'right after the close (training would slow the live scan).')})
+            continue
+        if msg in ('swing', 'swings', 'swing setups'):
+            try:
+                import history
+                (lines, _) = history.swing_scan()
+                body = '\n'.join(lines) if lines else 'No multi-day setups from the approved strategies right now.'
+            except Exception as e:
+                body = f"Couldn't scan: {e}"
+            replies.append({'key': f"CMD:{m['id']}", 'kind': 'REPLY', 'ticker': '', 'tags': ['speech_balloon'], 'title': 'Trader AI', 'body': body})
+            continue
         fm = re.match('\\s*filters?\\s+(\\w+)\\s+(on|off)\\s*$', m.get('message', ''), re.I)
         if fm:
             replies.append({'key': f"CMD:{m['id']}", 'kind': 'REPLY', 'ticker': '', 'tags': ['speech_balloon'], 'title': 'Trader AI', 'body': set_filter(fm.group(1), fm.group(2).lower() == 'on')})
@@ -295,6 +309,38 @@ def read_commands(cfg, state):
     if last_t:
         state['cmd_since'] = str(last_t - 1)
     return replies
+
+def evening_jobs(cfg, notify=True):
+    nny = datetime.now(NY)
+    mins = nny.hour * 60 + nny.minute
+    rs = load_state()
+    day = nny.strftime('%Y-%m-%d')
+    want_train = rs.get('train_now')
+    evening = nny.weekday() < 5 and mins >= 16 * 60 + 15 and (rs.get('evening_day') != day)
+    if not (evening or (want_train and (not market_open()))):
+        return
+    import history
+    rs['evening_day'] = day if evening else rs.get('evening_day')
+    rs['train_now'] = False
+    save_state(rs)
+    if evening and cfg.get('swing_alerts', True):
+        try:
+            history.grade_swing()
+            (lines, found) = history.swing_scan()
+            if lines and notify:
+                send("📈 Multi-day setups (buy at the close / tomorrow's open)", '\n'.join(lines) + "\n\nOnly strategies that passed the 10-year walk-forward test and suit today's market. Exit rules: ask 'swing rules' in the app. Paper trade first.", cfg, tags=['chart_with_upwards_trend'])
+        except Exception:
+            pass
+    try:
+        budget = int(os.getenv('TRAIN_BUDGET_S') or 900)
+        note = history.train(budget_s=budget, force=bool(want_train))
+        import bots
+        changes = bots.review()
+        if notify and (want_train or changes):
+            send('🎓 Trader AI trained on the past market', note + ('\n\n' + '\n'.join(changes) if changes else ''), cfg, tags=['mortar_board'])
+    except Exception as e:
+        if notify and want_train:
+            send('🎓 Training problem', f'{type(e).__name__}: {str(e)[:150]}', cfg, tags=['warning'])
 FILTER_NAMES = {'in_play': 'in_play_only', 'inplay': 'in_play_only', 'mood': 'mood_filter', 'not_red': 'mood_filter', 'spy': 'rs_filter', 'beats_spy': 'rs_filter', 'rs': 'rs_filter', 'cost': 'cost_filter', 'cost_ok': 'cost_filter', 'macro': 'macro_filter', 'fed': 'macro_filter', 'confidence': 'meta_filter', 'meta': 'meta_filter'}
 
 def set_filter(name, on):
@@ -374,6 +420,10 @@ def check_once(cfg=None, force=False, notify=True):
                 send(title, body, cfg, tags=['bar_chart'])
                 rs['report_day'] = nny.strftime('%Y-%m-%d')
                 save_state(rs)
+        except Exception:
+            pass
+        try:
+            evening_jobs(cfg, notify)
         except Exception:
             pass
         if cfg['market_hours_only'] and (not force) and (not market_open()):
