@@ -1,0 +1,224 @@
+<!DOCTYPE html>
+<html lang="en">
+<head>
+<meta charset="utf-8">
+<meta name="viewport" content="width=device-width, initial-scale=1, viewport-fit=cover">
+<meta name="apple-mobile-web-app-capable" content="yes">
+<meta name="mobile-web-app-capable" content="yes">
+<meta name="apple-mobile-web-app-status-bar-style" content="black-translucent">
+<meta name="apple-mobile-web-app-title" content="Trader AI">
+<meta name="theme-color" content="#0f172a">
+<link rel="manifest" href="manifest.webmanifest">
+<link rel="apple-touch-icon" href="apple-touch-icon.png">
+<link rel="icon" href="icon-192.png">
+<title>Trader AI</title>
+<style>
+:root{--bg:#0b1120;--card:#111a2e;--line:#1f2a44;--txt:#e5e7eb;--mut:#94a3b8;--g:#22c55e;--r:#ef4444;--y:#facc15;--b:#60a5fa}
+*{box-sizing:border-box;-webkit-tap-highlight-color:transparent}
+html,body{margin:0;background:var(--bg);color:var(--txt);font:15px/1.4 -apple-system,BlinkMacSystemFont,"SF Pro Text",system-ui,sans-serif}
+header{position:sticky;top:0;z-index:5;background:rgba(11,17,32,.92);backdrop-filter:blur(12px);padding:calc(env(safe-area-inset-top) + 10px) 16px 10px;border-bottom:1px solid var(--line);display:flex;align-items:center;gap:10px}
+header h1{font-size:19px;margin:0;flex:1}
+header .dot{width:10px;height:10px;border-radius:50%;background:var(--mut)}
+#upd{font-size:12px;color:var(--mut)}
+main{padding:12px 12px calc(env(safe-area-inset-bottom) + 84px)}
+.card{background:var(--card);border:1px solid var(--line);border-radius:16px;padding:14px;margin:0 0 12px}
+.card h2{font-size:13px;letter-spacing:.06em;text-transform:uppercase;color:var(--mut);margin:0 0 8px;font-weight:600}
+.big{font-size:17px;font-weight:600}
+.mut{color:var(--mut);font-size:13px}
+.row{display:flex;justify-content:space-between;align-items:center;gap:8px;padding:9px 0;border-top:1px solid var(--line)}
+.row:first-of-type{border-top:0}
+.pill{display:inline-block;padding:2px 8px;border-radius:999px;font-size:12px;font-weight:600;background:#1e293b;color:var(--txt)}
+.g{color:var(--g)}.r{color:var(--r)}.y{color:var(--y)}
+.pill.g{background:rgba(34,197,94,.15)}.pill.r{background:rgba(239,68,68,.15)}.pill.y{background:rgba(250,204,21,.15)}
+.alert{padding:11px 0;border-top:1px solid var(--line)}
+.alert:first-child{border-top:0}
+.alert .t{font-weight:600}
+.alert .b{white-space:pre-wrap;color:#cbd5e1;font-size:14px;margin-top:3px}
+.alert .w{font-size:12px;color:var(--mut);margin-top:3px}
+nav{position:fixed;bottom:0;left:0;right:0;display:flex;background:rgba(11,17,32,.96);backdrop-filter:blur(12px);border-top:1px solid var(--line);padding-bottom:env(safe-area-inset-bottom)}
+nav button{flex:1;background:none;border:0;color:var(--mut);padding:9px 0 7px;font-size:11px}
+nav button span{display:block;font-size:21px;line-height:1.1}
+nav button.on{color:var(--txt)}
+input,textarea{width:100%;background:#0b1325;border:1px solid var(--line);color:var(--txt);border-radius:12px;padding:12px;font-size:16px}
+.btn{background:#2563eb;color:#fff;border:0;border-radius:12px;padding:11px 14px;font-size:15px;font-weight:600}
+.btn.s{background:#1e293b}
+.chips{display:flex;flex-wrap:wrap;gap:8px;margin-top:10px}
+.chip{background:#1e293b;border:1px solid var(--line);color:var(--txt);border-radius:999px;padding:7px 12px;font-size:14px}
+.grid{display:grid;grid-template-columns:1fr 1fr;gap:10px}
+.stat{background:#0b1325;border-radius:12px;padding:10px}
+.stat .v{font-size:20px;font-weight:700}
+.stat .k{font-size:12px;color:var(--mut)}
+table{width:100%;border-collapse:collapse;font-size:13px}
+td,th{padding:6px 4px;border-top:1px solid var(--line);text-align:left}
+th{color:var(--mut);font-weight:500;border-top:0}
+.hide{display:none}
+.toast{position:fixed;left:50%;transform:translateX(-50%);bottom:calc(env(safe-area-inset-bottom) + 90px);background:#1e293b;border:1px solid var(--line);padding:10px 14px;border-radius:12px;font-size:14px;z-index:9;opacity:0;transition:.25s}
+.toast.on{opacity:1}
+</style>
+</head>
+<body>
+<header><div class="dot" id="dot"></div><h1>Trader AI</h1><div id="upd"></div></header>
+<main>
+  <section id="setup" class="hide">
+    <div class="card">
+      <h2>Connect your phone</h2>
+      <p>Open this app using the <b>📱 iPhone app link</b> from Trader AI on your Mac (Robinhood &amp; iPhone tab), or paste your private channel name below. It's stored only on this phone.</p>
+      <input id="topicIn" placeholder="trader-xxxxxxxx" autocapitalize="off" autocorrect="off" spellcheck="false">
+      <p><button class="btn" onclick="saveTopic()">Save</button></p>
+      <p class="mut">Then tap Share ⬆️ → <b>Add to Home Screen</b> to install Trader AI as an app.</p>
+    </div>
+  </section>
+
+  <section id="home" class="tab">
+    <div class="card" id="moodCard"><h2>Market</h2><div class="big" id="mood">Loading…</div><div class="mut" id="moodTxt"></div></div>
+    <div class="card" id="myCard"><h2>My trades today</h2><div id="myToday" class="mut">Connect Robinhood on your Mac to see your trades here.</div></div>
+    <div class="card"><h2>Latest alerts</h2><div id="homeAlerts" class="mut">Loading…</div></div>
+    <div class="card"><h2>Bot track record</h2><div id="record" class="grid"></div></div>
+  </section>
+
+  <section id="alerts" class="tab hide"><div class="card"><h2>Alerts &amp; replies (last 24 h)</h2><div id="allAlerts"></div></div></section>
+
+  <section id="trades" class="tab hide">
+    <div class="card"><h2>Exit plans I'm watching</h2><div id="pos" class="mut">None.</div></div>
+    <div class="card"><h2>Coach: your recent buys</h2><div id="buys" class="mut">No trades yet.</div></div>
+    <div class="card"><h2>Closed trades</h2><div id="closed" class="mut">None yet.</div></div>
+    <div class="card"><h2>Robinhood holdings</h2><div id="hold" class="mut">Not connected.</div></div>
+    <div class="card"><h2>Tell me about a trade</h2>
+      <div class="chips"><button class="chip" onclick="fill('bought 10 F at 11.20')">bought…</button><button class="chip" onclick="fill('sold F')">sold…</button><button class="chip" onclick="fill('stop F 10.80')">stop…</button><button class="chip" onclick="cmd('list')">list</button></div>
+      <p class="mut">Trades made in Robinhood are picked up automatically while your Mac app is running.</p></div>
+  </section>
+
+  <section id="watch" class="tab hide">
+    <div class="card"><h2>Stocks I'm studying</h2><div id="wl" class="mut">None yet.</div>
+      <p><input id="wIn" placeholder="Add stocks, e.g. AAPL TSLA" autocapitalize="characters"></p>
+      <div class="chips"><button class="btn" onclick="watchAdd()">Watch &amp; study</button><button class="btn s" onclick="cmd('watch list')">Refresh list</button></div></div>
+    <div class="card"><h2>Multi-day setups</h2><div id="swOn" class="mut"></div><div id="swIdeas"></div>
+      <div class="chips"><button class="chip" onclick="cmd('swing')">Scan for swing setups now</button></div></div>
+  </section>
+
+  <section id="bots" class="tab hide">
+    <div class="card"><h2>Bot leaderboard (after costs)</h2><div id="lb" class="mut">Loading…</div></div>
+    <div class="card"><h2>Training</h2><div id="train" class="mut"></div><div class="chips"><button class="chip" onclick="cmd('train')">Train on the past market</button></div></div>
+  </section>
+
+  <section id="ask" class="tab hide">
+    <div class="card"><h2>Send Trader AI a command</h2>
+      <textarea id="cmdIn" rows="2" placeholder="study NVDA · watch AAPL TSLA · bought 5 AMD at 120 · swing · train"></textarea>
+      <p><button class="btn" onclick="cmd(document.getElementById('cmdIn').value)">Send</button></p>
+      <div class="chips">
+        <button class="chip" onclick="cmd('list')">My stocks</button><button class="chip" onclick="cmd('swing')">Swing setups</button>
+        <button class="chip" onclick="cmd('watch list')">Watch list</button><button class="chip" onclick="cmd('train')">Train</button>
+        <button class="chip" onclick="cmd('filter in_play on')">filter in_play on</button><button class="chip" onclick="cmd('filter mood off')">filter mood off</button>
+      </div>
+      <p class="mut">Replies arrive as notifications and in the Alerts tab within a few minutes.</p></div>
+    <div class="card"><h2>Settings</h2><p class="mut">Channel saved on this phone. Research &amp; paper trading only. Trader AI never places orders.</p>
+      <button class="btn s" onclick="resetTopic()">Change channel</button></div>
+  </section>
+</main>
+<nav id="nav">
+  <button class="on" data-t="home"><span>🏠</span>Home</button>
+  <button data-t="alerts"><span>🔔</span>Alerts</button>
+  <button data-t="trades"><span>🧑‍🏫</span>My trades</button>
+  <button data-t="watch"><span>🔬</span>Watch</button>
+  <button data-t="bots"><span>🤖</span>Bots</button>
+  <button data-t="ask"><span>💬</span>Ask</button>
+</nav>
+<div class="toast" id="toast"></div>
+<script>
+const N = "https://ntfy.sh";
+let T = null, D = {}, A = [];
+const $ = id => document.getElementById(id);
+const esc = s => String(s ?? "").replace(/[&<>"]/g, c => ({"&":"&amp;","<":"&lt;",">":"&gt;",'"':"&quot;"}[c]));
+const money = x => (x < 0 ? "-" : "") + "$" + Math.abs(+x || 0).toFixed(2);
+function store(k, v) { try { v === undefined ? localStorage.removeItem(k) : localStorage.setItem(k, v); } catch (e) {} }
+function load(k) { try { return localStorage.getItem(k); } catch (e) { return null; } }
+function toast(t) { const el = $("toast"); el.textContent = t; el.classList.add("on"); setTimeout(() => el.classList.remove("on"), 2200); }
+
+function init() {
+  const m = location.hash.match(/t=([A-Za-z0-9_-]{6,64})/);
+  if (m) { store("topic", m[1]); history.replaceState(null, "", location.pathname); }
+  T = load("topic");
+  if (!T) { $("setup").classList.remove("hide"); document.querySelectorAll(".tab").forEach(e => e.classList.add("hide")); $("nav").classList.add("hide"); return; }
+  refresh(); setInterval(refresh, 60000);
+  document.addEventListener("visibilitychange", () => { if (!document.hidden) refresh(); });
+}
+function saveTopic() { const v = $("topicIn").value.trim(); if (!/^[A-Za-z0-9_-]{6,64}$/.test(v)) return toast("That doesn't look like a channel name"); store("topic", v); location.reload(); }
+function resetTopic() { store("topic"); location.reload(); }
+
+document.querySelectorAll("nav button").forEach(b => b.onclick = () => {
+  document.querySelectorAll("nav button").forEach(x => x.classList.toggle("on", x === b));
+  document.querySelectorAll(".tab").forEach(s => s.classList.toggle("hide", s.id !== b.dataset.t));
+  window.scrollTo(0, 0);
+});
+
+async function poll(topic, since) {
+  const r = await fetch(`${N}/${topic}/json?poll=1&since=${since}`, {cache: "no-store"});
+  if (!r.ok) throw new Error(r.status);
+  return (await r.text()).split("\n").filter(Boolean).map(l => { try { return JSON.parse(l); } catch (e) { return null; } }).filter(m => m && m.event === "message");
+}
+async function refresh() {
+  try {
+    const [dash, al] = await Promise.all([poll(T + "-dash", "24h"), poll(T, "24h")]);
+    D = {};
+    for (const m of dash) { const k = (m.title || "").replace("dash:", ""); try { D[k] = JSON.parse(m.message); D[k]._t = m.time; } catch (e) {} }
+    A = al.filter(m => !(m.title || "").startsWith("dash:")).sort((a, b) => b.time - a.time);
+    render(); $("dot").style.background = "var(--g)";
+    $("upd").textContent = "updated " + new Date().toLocaleTimeString([], {hour: "numeric", minute: "2-digit"});
+  } catch (e) { $("dot").style.background = "var(--r)"; $("upd").textContent = "offline"; }
+}
+function ago(t) { const s = Date.now() / 1000 - t; return s < 90 ? "just now" : s < 3600 ? Math.round(s / 60) + " min ago" : s < 86400 ? Math.round(s / 3600) + " h ago" : Math.round(s / 86400) + " d ago"; }
+function alertHtml(m) {
+  const acts = (m.actions || []).filter(a => a.action === "http").map(a => `<button class="chip" onclick='act(${JSON.stringify(a.url)},${JSON.stringify(a.body || "")})'>${esc(a.label)}</button>`).join("");
+  return `<div class="alert"><div class="t">${esc(m.title || "Trader AI")}</div><div class="b">${esc(m.message)}</div><div class="w">${ago(m.time)}</div>${acts ? `<div class="chips">${acts}</div>` : ""}</div>`;
+}
+async function act(url, body) { try { await fetch(url, {method: "POST", body}); toast("Sent ✓"); } catch (e) { toast("Couldn't send"); } }
+function stat(k, v, cls) { return `<div class="stat"><div class="v ${cls || ""}">${v}</div><div class="k">${k}</div></div>`; }
+
+function render() {
+  const s = D.status || {};
+  const col = {green: "g", yellow: "y", red: "r"}[s.mood] || "";
+  $("mood").innerHTML = s.mood ? `<span class="pill ${col}">${esc(s.mood)}</span> ${s.spy != null ? `SPY ${(+s.spy).toFixed(1)}% · QQQ ${(+s.qqq).toFixed(1)}% · VIX ${(+s.vix).toFixed(0)}` : ""}` : "Waiting for the scanner…";
+  $("moodTxt").innerHTML = [s.mood_text, s.macro && "📅 " + s.macro, s.regime && "🌦️ Market weather: " + s.regime, s.when && `from your ${s.src} · ${s.when}`].filter(Boolean).map(esc).join("<br>");
+  const rec = s.record || {}, r4 = s.record4w || {};
+  $("record").innerHTML = rec.n ? stat("signals graded", rec.n) + stat("win rate", (rec.win ?? 0).toFixed(0) + "%") + stat("avg per signal", (rec.avgR >= 0 ? "+" : "") + (+rec.avgR).toFixed(2) + "R", rec.avgR >= 0 ? "g" : "r") + stat("last 4 weeks", r4.n ? (r4.avgR >= 0 ? "+" : "") + (+r4.avgR).toFixed(2) + "R" : "-", r4.avgR >= 0 ? "g" : "r") : `<div class="mut">No graded signals yet.</div>`;
+  $("homeAlerts").innerHTML = A.slice(0, 4).map(alertHtml).join("") || "No alerts in the last 24 hours.";
+  $("allAlerts").innerHTML = A.map(alertHtml).join("") || `<div class="mut">No alerts in the last 24 hours.</div>`;
+
+  const tr = D.trades;
+  if (tr) {
+    const td = tr.summary.today || {}, al = tr.summary.all || {};
+    $("myToday").innerHTML = `<div class="grid">${stat("closed today", td.n || 0)}${stat("today", money(td.pnl || 0), (td.pnl || 0) >= 0 ? "g" : "r")}${stat("all trades win %", al.n ? al.win + "%" : "-")}${stat("all-time result", money(al.pnl || 0), (al.pnl || 0) >= 0 ? "g" : "r")}</div>`;
+    $("buys").innerHTML = (tr.buys || []).map(b => `<div class="row"><div><b>${esc(b.s)}</b> ${b.q} @ ${(+b.p).toFixed(2)}<div class="mut">${esc(b.t)}</div></div><span class="pill ${{A: "g", B: "g", C: "y", D: "r"}[b.g] || ""}">grade ${esc(b.g || "?")}</span></div>`).join("") || "No trades yet.";
+    $("closed").innerHTML = (tr.last || []).map(t => `<div class="row"><div><b>${esc(t.s)}</b> <span class="mut">grade ${esc(t.g || "?")}</span></div><div class="${t.pnl >= 0 ? "g" : "r"}">${money(t.pnl)}${t.R != null ? ` · ${t.R >= 0 ? "+" : ""}${t.R}R` : ""}</div></div>`).join("") || "None yet.";
+    $("hold").innerHTML = (tr.hold || []).map(h => `<div class="row"><b>${esc(h.s)}</b><div>${h.q}${h.a ? " @ " + (+h.a).toFixed(2) : ""}${h.p ? ` <span class="mut">now ${(+h.p).toFixed(2)}</span>` : ""}</div></div>`).join("") || "None.";
+  }
+  const ps = (D.positions || {}).rows || [];
+  $("pos").innerHTML = ps.map(p => `<div class="row"><div><b>${esc(p.s)}</b> ${p.q} @ ${(+p.in).toFixed(2)}<div class="mut">stop ${(+p.stop).toFixed(2)} · sell half ${(+p.t1).toFixed(2)} · rest ${(+p.t2).toFixed(2)}</div></div><button class="chip" onclick="cmd('sold ${esc(p.s)}')">I sold</button></div>`).join("") || "None.";
+
+  const w = (D.watch || {}).rows || [];
+  $("wl").innerHTML = w.map(x => `<div class="row"><div><b>${esc(x.s)}</b> ${x.px ? (+x.px).toFixed(2) : ""}<div class="mut">${esc([x.fit && "day: " + x.fit, x.sw && "swing: " + x.sw].filter(Boolean).join(" · ") || "watch only")}${x.pat && x.pat.length ? "<br>" + esc(x.pat.join(" · ")) : ""}${x.now && x.now.length ? " · 🔔 swing signal" : ""}</div></div><div class="chips" style="margin:0"><button class="chip" onclick="cmd('study ${esc(x.s)}')">🔬</button><button class="chip" onclick="cmd('unwatch ${esc(x.s)}')">✕</button></div></div>`).join("") || "None yet.";
+  const sw = D.swing || {};
+  $("swOn").innerHTML = (sw.on || []).length ? "Strategies ON today: " + sw.on.map(o => `<span class="pill g">${esc(o.n)}</span>`).join(" ") : "No multi-day strategy is approved for today's market (or training hasn't run yet).";
+  $("swIdeas").innerHTML = (sw.ideas || []).length ? `<table><tr><th>Stock</th><th>Strategy</th><th>Date</th><th>Result</th></tr>${sw.ideas.map(i => `<tr><td><b>${esc(i.s)}</b></td><td>${esc(i.n)}</td><td>${esc(i.d.slice(5))}</td><td class="${i.ret > 0 ? "g" : i.ret < 0 ? "r" : ""}">${i.st === "CLOSED" ? (i.ret > 0 ? "+" : "") + i.ret + "%" : "open"}</td></tr>`).join("")}</table>` : "";
+
+  const lb = (D.bots || {}).rows || [];
+  $("lb").innerHTML = lb.length ? `<table><tr><th>Bot</th><th>Live</th><th>Win</th><th>Avg R</th><th>History</th></tr>${lb.map(b => `<tr><td>${esc(b.n)}${b.p ? " ⭐" : ""}</td><td>${b.g}</td><td>${(+b.w).toFixed(0)}%</td><td class="${b.r >= 0 ? "g" : "r"}">${b.r >= 0 ? "+" : ""}${(+b.r).toFixed(2)}</td><td class="${(b.h || 0) >= 0 ? "g" : "r"}">${b.h != null ? (b.h >= 0 ? "+" : "") + (+b.h).toFixed(2) + ` (${b.hn})` : "-"}</td></tr>`).join("")}</table><p class="mut">⭐ = promoted: its ideas reach your phone. History = replay on the last 60 days.</p>` : "No data yet.";
+  $("train").innerHTML = s.trained ? `Last trained ${esc(s.trained.replace("T", " "))} UTC. Market weather: ${esc(s.regime || "?")}.` : "Not trained yet: it runs every weekday evening.";
+}
+async function cmd(text) {
+  text = (text || "").trim(); if (!text) return;
+  try { await fetch(`${N}/${T}-cmd`, {method: "POST", body: text}); toast("Sent: " + text); $("cmdIn").value = ""; setTimeout(refresh, 8000); }
+  catch (e) { toast("Couldn't send (offline?)"); }
+}
+function fill(t) { document.querySelector('nav button[data-t="ask"]').click(); $("cmdIn").value = t; $("cmdIn").focus(); }
+function watchAdd() {
+  const v = $("wIn").value.trim().toUpperCase(); if (!v) return;
+  const cur = ((D.watch || {}).rows || []).map(x => x.s);
+  const all = [...new Set([...cur, ...v.split(/[\s,]+/).filter(Boolean)])];
+  cmd("watch " + all.join(" ")); $("wIn").value = "";
+}
+if ("serviceWorker" in navigator) navigator.serviceWorker.register("sw.js").catch(() => {});
+init();
+</script>
+</body>
+</html>
