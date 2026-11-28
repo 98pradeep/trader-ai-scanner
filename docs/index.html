@@ -72,6 +72,7 @@ th{color:var(--mut);font-weight:500;border-top:0}
   <section id="home" class="tab">
     <div class="card" id="moodCard"><h2>Market</h2><div class="big" id="mood">Loading…</div><div class="mut" id="moodTxt"></div></div>
     <div class="card" id="myCard"><h2>My trades today</h2><div id="myToday" class="mut">Connect Robinhood on your Mac to see your trades here.</div></div>
+    <div class="card" id="botCard"><h2>🤖 Trader AI's virtual $10</h2><div id="bot10" class="mut">Starts trading on the next market day.</div></div>
     <div class="card"><h2>Latest alerts</h2><div id="homeAlerts" class="mut">Loading…</div></div>
     <div class="card"><h2>Bot track record</h2><div id="record" class="grid"></div></div>
   </section>
@@ -191,6 +192,13 @@ function render() {
     $("buys").innerHTML = (tr.buys || []).map(b => `<div class="row"><div><b>${esc(b.s)}</b> ${b.q} @ ${(+b.p).toFixed(2)}<div class="mut">${esc(b.t)}</div></div><span class="pill ${{A: "g", B: "g", C: "y", D: "r"}[b.g] || ""}">grade ${esc(b.g || "?")}</span></div>`).join("") || "No trades yet.";
     $("closed").innerHTML = (tr.last || []).map(t => `<div class="row"><div><b>${esc(t.s)}</b> <span class="mut">grade ${esc(t.g || "?")}</span></div><div class="${t.pnl >= 0 ? "g" : "r"}">${money(t.pnl)}${t.R != null ? ` · ${t.R >= 0 ? "+" : ""}${t.R}R` : ""}</div></div>`).join("") || "None yet.";
     $("hold").innerHTML = (tr.hold || []).map(h => `<div class="row"><b>${esc(h.s)}</b><div>${h.q}${h.a ? " @ " + (+h.a).toFixed(2) : ""}${h.p ? ` <span class="mut">now ${(+h.p).toFixed(2)}</span>` : ""}</div></div>`).join("") || "None.";
+  }
+  const b = D.bot10;
+  if (b) {
+    $("bot10").innerHTML = `<div class="grid">${stat("value", money(b.value), b.value >= b.start ? "g" : "r")}${stat("since " + esc(b.since), (b.pct >= 0 ? "+" : "") + b.pct + "%", b.pct >= 0 ? "g" : "r")}${stat("trades", b.n)}${stat("winners", b.win != null ? b.win + "%" : "-")}</div>` +
+      (b.open ? `<p>Holding <b>${esc(b.open.ticker)}</b> from ${(+b.open.entry).toFixed(4)} · stop ${(+b.open.stop).toFixed(4)} · target ${(+b.open.target).toFixed(4)}</p>` : "") +
+      (b.last || []).map(x => `<div class="row"><div><b>${esc(x.s)}</b> <span class="mut">${esc(x.d)} · ${esc(x.why)}</span></div><div class="${x.pnl >= 0 ? "g" : "r"}">${money(x.pnl)}</div></div>`).join("") +
+      `<p class="mut">Virtual money only. Nothing is sent to Robinhood.</p>`;
   }
   const ps = (D.positions || {}).rows || [];
   $("pos").innerHTML = ps.map(p => `<div class="row"><div><b>${esc(p.s)}</b> ${p.q} @ ${(+p.in).toFixed(2)}<div class="mut">stop ${(+p.stop).toFixed(2)} · sell half ${(+p.t1).toFixed(2)} · rest ${(+p.t2).toFixed(2)}</div></div><button class="chip" onclick="cmd('sold ${esc(p.s)}')">I sold</button></div>`).join("") || "None.";
