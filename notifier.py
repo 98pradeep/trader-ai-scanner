@@ -299,6 +299,15 @@ def read_commands(cfg, state):
         if fm:
             replies.append({'key': f"CMD:{m['id']}", 'kind': 'REPLY', 'ticker': '', 'tags': ['speech_balloon'], 'title': 'Trader AI', 'body': set_filter(fm.group(1), fm.group(2).lower() == 'on')})
             continue
+        quiet = m.get('message', '').lstrip().startswith('[rh]')
+        if quiet:
+            c = positions.parse_command(m['message'].lstrip()[4:])
+            if c:
+                try:
+                    positions.run_command(c, 'robinhood')
+                except Exception:
+                    pass
+            continue
         c = positions.parse_command(m.get('message', ''))
         try:
             reply = positions.run_command(c, 'phone') if c else 'I didn\'t understand: "' + m.get('message', '')[:80] + '". Try: bought 10 F at 11.20 · sold F · stop F 10.80 · list'
@@ -309,6 +318,27 @@ def read_commands(cfg, state):
     if last_t:
         state['cmd_since'] = str(last_t - 1)
     return replies
+
+def robinhood_jobs(cfg, notify=True):
+    if os.getenv('NTFY_TOPIC'):
+        return
+    import robinhood
+    if not robinhood.status().get('has_token'):
+        return
+    msgs = robinhood.sync(min_gap_s=120 if market_open() else 1800)
+    for m in msgs:
+        if not notify:
+            continue
+        if cfg.get('mac'):
+            try:
+                _mac(m['title'], m['body'])
+            except Exception:
+                pass
+        if cfg.get('phone_topic'):
+            try:
+                _phone(cfg['phone_topic'], m['title'], m['body'], False, m.get('tags', ()), None, ())
+            except Exception:
+                pass
 
 def evening_jobs(cfg, notify=True):
     nny = datetime.now(NY)
@@ -424,6 +454,15 @@ def check_once(cfg=None, force=False, notify=True):
             pass
         try:
             evening_jobs(cfg, notify)
+        except Exception:
+            pass
+        try:
+            robinhood_jobs(cfg, notify)
+        except Exception:
+            pass
+        try:
+            import dash
+            dash.publish(cfg, src='cloud' if os.getenv('NTFY_TOPIC') else 'Mac', min_gap=900 if market_open() else 7200)
         except Exception:
             pass
         if cfg['market_hours_only'] and (not force) and (not market_open()):
