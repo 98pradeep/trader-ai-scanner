@@ -67,6 +67,12 @@ def sections(src='mac'):
     except Exception:
         pass
     try:
+        import autobot
+        if autobot.FILE.exists():
+            out['bot10'] = json.dumps(dict(autobot.summary(), ts=time.time()), separators=(',', ':'))
+    except Exception:
+        pass
+    try:
         import positions
         rows = [{'s': p['ticker'], 'q': p['shares'], 'in': p['price'], 'stop': p['stop'], 't1': p['target'], 't2': p['target2'], 'src': p.get('source', '')} for p in positions.load()]
         out['positions'] = _fit({'ts': time.time(), 'rows': rows}, 'rows')

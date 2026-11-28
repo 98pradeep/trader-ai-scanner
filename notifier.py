@@ -199,7 +199,7 @@ def find_buys(cfg):
             body = mac['note'] + '\n' + body
         if pl.get('earn') == 'soon':
             body = '⚠️ ' + pl['earn_text'].capitalize() + ": big overnight gap risk, don't hold it past the close.\n" + body
-        events.append({'key': f'BUY:{t}:{tf}:{now_ny:%Y-%m-%d}:{now_ny.hour // 2}', 'kind': 'BUY', 'ticker': t, 'tags': ['green_circle'], 'click': f'https://www.tradingview.com/chart/?symbol={t}', 'title': title, 'body': body, 'cmds': [{'label': 'I bought it', 'cmd': f"bought {plan['qty']:g} {t} at {plan['entry']:.4g} stop {plan['stop']:.4g} target {plan['target']:.4g}"}]})
+        events.append({'key': f'BUY:{t}:{tf}:{now_ny:%Y-%m-%d}:{now_ny.hour // 2}', 'kind': 'BUY', 'ticker': t, 'tags': ['green_circle'], 'click': f'https://www.tradingview.com/chart/?symbol={t}', 'title': title, 'body': body, 'plan': {'entry': plan['entry'], 'stop': plan['stop'], 'target': plan['target']}, 'cmds': [{'label': 'I bought it', 'cmd': f"bought {plan['qty']:g} {t} at {plan['entry']:.4g} stop {plan['stop']:.4g} target {plan['target']:.4g}"}]})
     try:
         import bots
         import study
@@ -489,6 +489,13 @@ def check_once(cfg=None, force=False, notify=True):
             events += buys
         except Exception as e:
             problems.append(f'scan: {type(e).__name__}: {str(e)[:100]}')
+        if os.getenv('NTFY_TOPIC') or not cfg.get('cloud'):
+            try:
+                import autobot
+                events += autobot.manage()
+                events += autobot.on_buys([e for e in events if e.get('kind') == 'BUY'])
+            except Exception as e:
+                problems.append(f'virtual $10: {type(e).__name__}')
         state = load_state()
         if info.get('held'):
             day = datetime.now(NY).strftime('%Y-%m-%d')
